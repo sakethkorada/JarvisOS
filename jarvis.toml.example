@@ -1,0 +1,16 @@
+[models]
+# Provider-agnostic model name. Can point at local or cloud providers.
+default = "ollama/llama3.2:3b"
+
+[models.modes]
+balanced = "ollama/llama3.2:3b"
+private = "ollama/llama3.2:3b"
+fast = "ollama/llama3.2:3b"
+
+[providers.ollama]
+host = "http://localhost:11434"
+models = ["llama3.2:3b"]
+
+[plugins]
+paths = []
+

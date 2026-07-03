@@ -462,7 +462,16 @@ Preferred tooling:
 
 Standards:
 
+- Follow PEP 8 naming and layout conventions.
+- Use `snake_case` for functions, methods, variables, modules, and file names.
+- Use `PascalCase` for classes and `UPPER_SNAKE_CASE` for constants.
 - Use type hints on public functions and methods.
+- Add standard Python docstrings for public modules, classes, functions, and
+  methods.
+- Keep comments minimal and useful. Explain intent, constraints, or non-obvious
+  behavior rather than restating what the code already says.
+- Prefer simple, readable code over clever abstractions.
+- Do not add emojis, decorative comments, or fancy formatting in code.
 - Keep interfaces separate from implementations.
 - Keep runtime logic separate from CLI rendering.
 - Do not pass raw dictionaries deeply when a schema is known.
@@ -514,4 +523,3 @@ JarvisOS is a terminal-first, model-agnostic personal orchestration runtime that
 coordinates user-configurable agents, tools, plugins, MCP servers, memory,
 policies, approvals, and local or cloud models to execute personalized AI
 workflows safely and transparently.
-
