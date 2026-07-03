@@ -73,3 +73,41 @@ non-obvious behavior.
 Reason: JarvisOS is expected to grow across agents, tools, providers, and
 plugins, so future contributors need enough context to understand seams without
 reading a large external design document first.
+
+## 0008 - Local Plugin Runtime Before Online Acquisition
+
+The runtime loads plugins from local folders declared in settings. Future online
+plugin support should download or sync plugins into local folders first, then use
+the same manifest loader.
+
+Reason: loading and executing tools is a runtime concern, while downloading,
+trust, version pinning, and updates are acquisition concerns. Keeping those
+separate lets local custom plugins and downloaded plugins share one execution
+path.
+
+## 0009 - Keep Package Flat Until Responsibility Pressure Appears
+
+The current package keeps one file per early subsystem under `src/jarvis/`, such
+as `models.py`, `tools.py`, `plugins.py`, `settings.py`, and `orchestrator.py`.
+
+Reason: the first slices are still small enough that a flat layout is easier to
+read and change. Refactor into subpackages when files start mixing multiple
+responsibilities or become hard to scan.
+
+Likely future split points:
+
+- `models.py` into `models/base.py`, `models/router.py`, `models/ollama.py`.
+- `tools.py` into `tools/registry.py`, `tools/builtins.py`, `tools/executor.py`.
+- `plugins.py` into `plugins/manifest.py`, `plugins/loader.py`, and later
+  `plugins/acquisition.py`.
+- `cli.py` into a `cli/` package once commands grow.
+
+## 0010 - Build Memory Store Before Automatic Memory Writes
+
+JarvisOS now has a local SQLite memory store and manual memory commands.
+Automatic memory extraction is suggest-only and does not silently write durable
+memory.
+
+Reason: the runtime needs a real memory substrate before smarter memory
+behavior, but personal memory should remain conservative until approval and
+review flows are stronger.

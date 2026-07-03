@@ -43,12 +43,22 @@ class PluginSettings:
 
 
 @dataclass(frozen=True)
+class MemorySettings:
+    """Memory persistence and extraction settings."""
+
+    database_path: Path = Path(".jarvis/memory.sqlite3")
+    auto_extract: bool = True
+    auto_write: bool = False
+
+
+@dataclass(frozen=True)
 class JarvisSettings:
     """Resolved application settings from config files and environment."""
 
     models: ModelSettings = field(default_factory=ModelSettings)
     providers: ProviderSettings = field(default_factory=ProviderSettings)
     plugins: PluginSettings = field(default_factory=PluginSettings)
+    memory: MemorySettings = field(default_factory=MemorySettings)
     loaded_from: Path | None = None
 
     def resolve_model(
@@ -92,12 +102,22 @@ def _settings_from_data(
     provider_data = _table(data, "providers")
     ollama_data = _table(provider_data, "ollama")
     plugin_data = _table(data, "plugins")
+    memory_data = _table(data, "memory")
 
     modes = _string_map(_table(model_data, "modes"))
     default_model = _optional_string(model_data.get("default"))
     ollama_host = _optional_string(ollama_data.get("host")) or "http://localhost:11434"
     ollama_models = tuple(_string_list(ollama_data.get("models")))
-    plugin_paths = tuple(Path(path) for path in _string_list(plugin_data.get("paths")))
+    plugin_paths = tuple(
+        _resolve_config_path(path, loaded_from)
+        for path in _string_list(plugin_data.get("paths"))
+    )
+    memory_database_path = _resolve_config_path(
+        _optional_string(memory_data.get("database_path")) or ".jarvis/memory.sqlite3",
+        loaded_from,
+    )
+    auto_extract = _optional_bool(memory_data.get("auto_extract"), default=True)
+    auto_write = _optional_bool(memory_data.get("auto_write"), default=False)
 
     return JarvisSettings(
         models=ModelSettings(default=default_model, modes=modes),
@@ -106,6 +126,11 @@ def _settings_from_data(
             ollama_models=ollama_models,
         ),
         plugins=PluginSettings(paths=plugin_paths),
+        memory=MemorySettings(
+            database_path=memory_database_path,
+            auto_extract=auto_extract,
+            auto_write=auto_write,
+        ),
         loaded_from=loaded_from,
     )
 
@@ -131,8 +156,17 @@ def _settings_with_environment(settings: JarvisSettings) -> JarvisSettings:
             ollama_models=tuple(ollama_models),
         ),
         plugins=settings.plugins,
+        memory=settings.memory,
         loaded_from=settings.loaded_from,
     )
+
+
+def _resolve_config_path(path: str, loaded_from: Path | None) -> Path:
+    """Resolve relative config paths against the config file directory."""
+    plugin_path = Path(path)
+    if plugin_path.is_absolute() or loaded_from is None:
+        return plugin_path
+    return loaded_from.parent / plugin_path
 
 
 def _table(data: dict[str, Any], key: str) -> dict[str, Any]:
@@ -149,6 +183,14 @@ def _optional_string(value: Any) -> str | None:
         raise ValueError(f"Expected string value, got {type(value).__name__}.")
     value = value.strip()
     return value or None
+
+
+def _optional_bool(value: Any, default: bool) -> bool:
+    if value is None:
+        return default
+    if not isinstance(value, bool):
+        raise ValueError(f"Expected boolean value, got {type(value).__name__}.")
+    return value
 
 
 def _string_list(value: Any) -> list[str]:

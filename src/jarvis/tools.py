@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from jarvis.contracts import ToolCall, ToolHandler, ToolResult, ToolSpec
+from jarvis.memory import MemoryStore
 
 
 class ToolRegistry:
@@ -25,6 +26,10 @@ class ToolRegistry:
             return self._specs[name]
         except KeyError as exc:
             raise KeyError(f"Unknown tool: {name}") from exc
+
+    def has(self, name: str) -> bool:
+        """Return whether a tool is registered."""
+        return name in self._specs
 
     def execute(self, call: ToolCall) -> ToolResult:
         """Execute a registered tool call and normalize failures."""
@@ -66,12 +71,24 @@ def _task_create_summary(arguments: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _memory_search(arguments: dict[str, Any]) -> dict[str, Any]:
+def _memory_search(arguments: dict[str, Any], memory_store: MemoryStore) -> dict[str, Any]:
     query = str(arguments.get("query", "")).strip()
+    limit = int(arguments.get("limit", 5))
+    records = memory_store.search(query, limit=limit)
     return {
         "query": query,
-        "matches": [],
-        "note": "No durable memory store is configured yet.",
+        "matches": [
+            {
+                "id": record.id,
+                "type": record.type,
+                "content": record.content,
+                "source": record.source,
+                "created_at": record.created_at,
+                "updated_at": record.updated_at,
+                "metadata": record.metadata,
+            }
+            for record in records
+        ],
     }
 
 
@@ -84,7 +101,7 @@ def _calendar_search_events(arguments: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def default_tool_registry() -> ToolRegistry:
+def default_tool_registry(memory_store: MemoryStore | None = None) -> ToolRegistry:
     """Create the built-in demo tools for the first runtime slice."""
     registry = ToolRegistry()
     registry.register(
@@ -101,13 +118,14 @@ def default_tool_registry() -> ToolRegistry:
         ),
         _task_create_summary,
     )
-    registry.register(
-        ToolSpec(
-            name="memory.search",
-            description="Search local memory records.",
-        ),
-        _memory_search,
-    )
+    if memory_store is not None:
+        registry.register(
+            ToolSpec(
+                name="memory.search",
+                description="Search local memory records.",
+            ),
+            lambda arguments: _memory_search(arguments, memory_store),
+        )
     registry.register(
         ToolSpec(
             name="calendar.search_events",

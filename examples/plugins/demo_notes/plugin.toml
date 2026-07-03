@@ -1,0 +1,10 @@
+name = "demo_notes"
+description = "Demo local notes plugin."
+
+[[tools]]
+name = "notes.search"
+description = "Search deterministic demo notes."
+handler = "tools.search_notes"
+risk_level = "low"
+requires_approval = false
+

@@ -11,6 +11,7 @@ from uuid import uuid4
 RiskLevel = Literal["low", "medium", "high"]
 PolicyStatus = Literal["allowed", "approval_required", "denied"]
 StepStatus = Literal["pending", "completed", "failed", "approval_required"]
+MemoryType = Literal["preference", "fact", "note", "context"]
 
 
 def new_id(prefix: str) -> str:
@@ -58,6 +59,7 @@ class ToolSpec:
     description: str
     risk_level: RiskLevel = "low"
     requires_approval: bool = False
+    source: str = "builtin"
 
 
 ToolHandler = Callable[[dict[str, Any]], dict[str, Any]]
@@ -134,3 +136,26 @@ class RunResult:
     trace: tuple[TraceEvent, ...]
     final_response: str
     status: str
+
+
+@dataclass(frozen=True)
+class MemoryRecord:
+    """Durable memory stored for future runs."""
+
+    id: str
+    type: MemoryType
+    content: str
+    source: str
+    created_at: str
+    updated_at: str
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class MemoryCandidate:
+    """Suggested memory that has not been persisted yet."""
+
+    type: MemoryType
+    content: str
+    reason: str
+    source: str = "run"

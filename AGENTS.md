@@ -270,6 +270,15 @@ plugins from configured local paths, but the user is responsible for downloading
 installing, or trusting plugin code. This is similar in spirit to how developer
 tools let users opt into local extensions.
 
+Keep plugin loading separate from plugin acquisition:
+
+- plugin loading runs already-local plugin folders,
+- plugin acquisition downloads, installs, updates, or syncs online plugins.
+
+Online plugins should become local plugin folders before the runtime executes
+them. This lets local custom plugins and downloaded plugins share the same
+manifest and execution path.
+
 Later versions can add:
 
 - plugin installation helpers,
@@ -327,6 +336,15 @@ Long-term memory may eventually include:
 
 Early memory can be SQLite-backed records with simple search. Vector retrieval,
 confidence scores, memory deduplication, decay, and dashboards can come later.
+
+Memory should eventually run at two points:
+
+- start of run: retrieve relevant stored memory for the orchestrator and tools,
+- end of run: suggest durable memory candidates from explicit user preferences
+  or important context.
+
+Early automatic extraction should be suggest-only. Do not silently write durable
+memory until approval flows and memory review are stronger.
 
 Important memory rules:
 

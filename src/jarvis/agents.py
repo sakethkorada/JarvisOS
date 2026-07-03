@@ -51,4 +51,11 @@ def default_agent_registry() -> AgentRegistry:
             allowed_tools=("calendar.search_events",),
         )
     )
+    registry.register(
+        AgentSpec(
+            name="plugin",
+            description="Runs tools provided by user-managed local plugins.",
+            allowed_tools=("*",),
+        )
+    )
     return registry

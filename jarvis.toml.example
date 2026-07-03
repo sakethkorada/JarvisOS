@@ -12,5 +12,11 @@ host = "http://localhost:11434"
 models = ["llama3.2:3b"]
 
 [plugins]
-paths = []
+# Plugin paths may point at local custom plugins or plugin folders downloaded by
+# a future installer. Runtime loading treats both the same after they are local.
+paths = ["examples/plugins/demo_notes"]
 
+[memory]
+database_path = ".jarvis/memory.sqlite3"
+auto_extract = true
+auto_write = false

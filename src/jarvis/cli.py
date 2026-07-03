@@ -9,10 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from jarvis.agents import default_agent_registry
+from jarvis.contracts import MemoryRecord
+from jarvis.memory import MemoryStore
 from jarvis.models import default_model_router
-from jarvis.runtime import create_default_orchestrator
+from jarvis.runtime import create_default_orchestrator, create_default_tool_registry
 from jarvis.settings import load_settings
-from jarvis.tools import default_tool_registry
 
 
 def _json_default(value: Any) -> Any:
@@ -55,7 +56,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
 
     subparsers.add_parser("agents", help="List available agents.")
-    subparsers.add_parser("tools", help="List available tools.")
+    tools_parser = subparsers.add_parser("tools", help="List available tools.")
+    tools_parser.add_argument(
+        "--config",
+        type=Path,
+        help="Path to a JarvisOS TOML config file.",
+    )
     subparsers.add_parser("models", help="List available model providers.")
     settings_parser = subparsers.add_parser("settings", help="Show resolved settings.")
     settings_parser.add_argument(
@@ -63,6 +69,33 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Path to a JarvisOS TOML config file.",
     )
+    memory_parser = subparsers.add_parser("memory", help="Manage local memory.")
+    memory_subparsers = memory_parser.add_subparsers(
+        dest="memory_command",
+        required=True,
+    )
+    memory_add = memory_subparsers.add_parser("add", help="Add a memory record.")
+    memory_add.add_argument("content", help="Memory content to store.")
+    memory_add.add_argument(
+        "--type",
+        default="note",
+        choices=("preference", "fact", "note", "context"),
+        help="Memory type.",
+    )
+    memory_add.add_argument("--source", default="manual", help="Memory source.")
+    memory_add.add_argument("--config", type=Path, help="Path to config.")
+
+    memory_search = memory_subparsers.add_parser(
+        "search",
+        help="Search local memory records.",
+    )
+    memory_search.add_argument("query", help="Search query.")
+    memory_search.add_argument("--limit", type=int, default=5, help="Result limit.")
+    memory_search.add_argument("--config", type=Path, help="Path to config.")
+
+    memory_list = memory_subparsers.add_parser("list", help="List recent memories.")
+    memory_list.add_argument("--limit", type=int, default=20, help="Result limit.")
+    memory_list.add_argument("--config", type=Path, help="Path to config.")
     return parser
 
 
@@ -95,9 +128,13 @@ def main() -> None:
         return
 
     if args.command == "tools":
-        for tool in default_tool_registry().list():
+        settings = load_settings(args.config)
+        for tool in create_default_tool_registry(settings).list():
             approval = "approval required" if tool.requires_approval else "auto"
-            print(f"{tool.name}: {tool.description} [{tool.risk_level}, {approval}]")
+            print(
+                f"{tool.name}: {tool.description} "
+                f"[{tool.risk_level}, {approval}, {tool.source}]"
+            )
         return
 
     if args.command == "models":
@@ -110,4 +147,30 @@ def main() -> None:
         print(json.dumps(settings, default=_json_default, indent=2))
         return
 
+    if args.command == "memory":
+        settings = load_settings(args.config)
+        memory_store = MemoryStore(settings.memory.database_path)
+        if args.memory_command == "add":
+            record = memory_store.add(
+                args.content,
+                memory_type=args.type,
+                source=args.source,
+            )
+            _print_memory_record(record)
+            return
+        if args.memory_command == "search":
+            for record in memory_store.search(args.query, limit=args.limit):
+                _print_memory_record(record)
+            return
+        if args.memory_command == "list":
+            for record in memory_store.list(limit=args.limit):
+                _print_memory_record(record)
+            return
+
     parser.error(f"Unknown command: {args.command}")
+
+
+def _print_memory_record(record: MemoryRecord) -> None:
+    """Print one memory record in a compact CLI format."""
+    print(f"{record.id} [{record.type}] {record.content}")
+    print(f"  source={record.source} updated_at={record.updated_at}")

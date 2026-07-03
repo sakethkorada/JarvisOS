@@ -15,6 +15,7 @@ from jarvis.contracts import (
     TraceEvent,
     new_id,
 )
+from jarvis.memory import MemoryExtractor
 from jarvis.models import ModelRouter
 from jarvis.policies import PolicyEngine
 from jarvis.tools import ToolRegistry
@@ -29,11 +30,15 @@ class Orchestrator:
         tools: ToolRegistry,
         models: ModelRouter,
         policies: PolicyEngine,
+        memory_extractor: MemoryExtractor | None = None,
+        auto_write_memory: bool = False,
     ) -> None:
         self._agents = agents
         self._tools = tools
         self._models = models
         self._policies = policies
+        self._memory_extractor = memory_extractor
+        self._auto_write_memory = auto_write_memory
 
     def run(
         self,
@@ -76,7 +81,7 @@ class Orchestrator:
             agent = self._agents.get(step.agent_name)
             tool = self._tools.get(step.tool_call.tool_name)
 
-            if tool.name not in agent.allowed_tools:
+            if "*" not in agent.allowed_tools and tool.name not in agent.allowed_tools:
                 result = ToolResult(
                     tool_name=tool.name,
                     output={},
@@ -132,6 +137,37 @@ class Orchestrator:
 
         final_plan = replace(plan, steps=tuple(completed_steps))
         final_response = self._summarize(goal, results, status)
+        memory_candidates = self._suggest_memory(goal, final_response)
+        if memory_candidates:
+            trace.append(
+                TraceEvent(
+                    "memory.suggested",
+                    "Memory candidates were suggested but not saved.",
+                    data={
+                        "auto_write_requested": self._auto_write_memory,
+                        "candidates": [
+                            {
+                                "type": candidate.type,
+                                "content": candidate.content,
+                                "reason": candidate.reason,
+                                "source": candidate.source,
+                            }
+                            for candidate in memory_candidates
+                        ],
+                    },
+                )
+            )
+            final_response = "\n".join(
+                [
+                    final_response,
+                    "",
+                    "Suggested memory:",
+                    *[
+                        f"- {candidate.content} ({candidate.reason})"
+                        for candidate in memory_candidates
+                    ],
+                ]
+            )
         trace.append(TraceEvent("run.finished", f"Run finished with status {status}."))
 
         return RunResult(
@@ -163,6 +199,16 @@ class Orchestrator:
                     agent_name="calendar",
                     tool_call=ToolCall("calendar.search_events", {"query": goal}),
                     description="Check calendar context.",
+                )
+            )
+
+        if "note" in normalized and self._tools.has("notes.search"):
+            steps.append(
+                PlanStep(
+                    id=new_id("step"),
+                    agent_name="plugin",
+                    tool_call=ToolCall("notes.search", {"query": goal}),
+                    description="Search configured notes plugin.",
                 )
             )
 
@@ -207,3 +253,9 @@ class Orchestrator:
             for result in failed:
                 lines.append(f"- {result.tool_name}: {result.error}")
         return "\n".join(lines)
+
+    def _suggest_memory(self, goal: str, final_response: str):
+        """Suggest memory candidates after a run without persisting them."""
+        if self._memory_extractor is None:
+            return []
+        return self._memory_extractor.suggest(goal, final_response)

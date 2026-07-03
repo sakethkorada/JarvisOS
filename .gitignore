@@ -17,6 +17,7 @@ venv/
 !.env.example
 
 # Runtime state
+.jarvis/
 *.sqlite
 *.sqlite3
 *.db
@@ -28,4 +29,3 @@ traces/
 Thumbs.db
 .vscode/
 .idea/
-
