@@ -1,10 +1,29 @@
-# Example JarvisOS config for a trusted local Google Calendar MCP stdio server.
-# Replace the command and args with the installed server's real launch command.
+# Example JarvisOS config for Google's official remote Calendar MCP server.
+# Store a token with `python -m jarvis auth set-token google <access-token>`
+# or set GOOGLE_MCP_ACCESS_TOKEN in the shell before running JarvisOS.
+
+[auth]
+database_path = ".jarvis/auth.sqlite3"
+
+[[auth.oauth_providers]]
+name = "google"
+client_id = "replace-with-google-oauth-client-id"
+client_secret_env = "GOOGLE_OAUTH_CLIENT_SECRET"
+authorization_url = "https://accounts.google.com/o/oauth2/v2/auth"
+token_url = "https://oauth2.googleapis.com/token"
+redirect_uri = "http://localhost:8765/oauth/callback"
+scopes = [
+  "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+  "https://www.googleapis.com/auth/calendar.events.freebusy",
+  "https://www.googleapis.com/auth/calendar.events.readonly",
+]
 
 [[mcp.servers]]
 name = "google_calendar"
-command = "python"
-args = ["path/to/google_calendar_mcp_server.py"]
+transport = "http"
+url = "https://calendarmcp.googleapis.com/mcp/v1"
+auth_provider = "google"
+bearer_token_env = "GOOGLE_MCP_ACCESS_TOKEN"
 risk_level = "medium"
 requires_approval = true
 

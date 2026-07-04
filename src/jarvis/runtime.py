@@ -10,6 +10,7 @@ from jarvis.orchestration.orchestrator import Orchestrator
 from jarvis.policies import PolicyEngine
 from jarvis.prompts import PromptLibrary
 from jarvis.settings import JarvisSettings, load_settings
+from jarvis.storage.auth import AuthStore
 from jarvis.storage.approvals import ApprovalStore
 from jarvis.storage.memory import MemoryExtractor, MemoryStore
 from jarvis.storage.tasks import TaskStore
@@ -25,7 +26,7 @@ def create_default_orchestrator(settings: JarvisSettings | None = None) -> Orche
     approval_store = ApprovalStore(settings.approvals.database_path)
     tools = default_tool_registry(memory_store, task_store)
     load_plugins(settings.plugins.paths, tools)
-    load_mcp_tools(settings.mcp.servers, tools)
+    load_mcp_tools(settings.mcp.servers, tools, _mcp_auth_store(settings))
     prompts = PromptLibrary(
         planner_prompt_path=settings.prompts.planner_path,
         synthesis_prompt_path=settings.prompts.synthesis_path,
@@ -53,7 +54,7 @@ def create_default_tool_registry(
         TaskStore(settings.tasks.database_path),
     )
     load_plugins(settings.plugins.paths, tools)
-    load_mcp_tools(settings.mcp.servers, tools)
+    load_mcp_tools(settings.mcp.servers, tools, _mcp_auth_store(settings))
     return tools
 
 
@@ -75,3 +76,11 @@ def create_default_task_store(settings: JarvisSettings | None = None) -> TaskSto
     """Create the default local task store from settings."""
     settings = settings or load_settings()
     return TaskStore(settings.tasks.database_path)
+
+
+def _mcp_auth_store(settings: JarvisSettings) -> AuthStore | None:
+    """Create auth storage only when configured MCP servers need it."""
+    for server in settings.mcp.servers:
+        if server.enabled and server.auth_provider:
+            return AuthStore(settings.auth.database_path)
+    return None

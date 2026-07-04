@@ -262,3 +262,30 @@ Reason: the planner, policy engine, CLI tool listing, and trace records should
 all see one consistent tool policy. Calendar reads can be auto-allowed while
 Calendar writes, Gmail sends, playback controls, and destructive actions remain
 approval-gated.
+
+## 0026 - Add HTTP MCP Below the Existing Tool Contract
+
+JarvisOS now supports both stdio and streamable HTTP MCP servers behind the same
+tool registration path.
+
+Reason: official Google Workspace MCP servers and many future hosted tools use
+HTTP. The orchestrator should not care whether a tool came from a local process
+or a remote endpoint; it should still see one `ToolSpec`, one policy decision,
+one tool result, and one trace path.
+
+Tradeoff: the current HTTP client handles request/response JSON and simple SSE
+responses, but not richer long-lived sessions or server-initiated requests yet.
+
+## 0027 - Treat OAuth as an Integration Substrate
+
+JarvisOS now has provider metadata in settings and a SQLite auth store that can
+supply bearer tokens to HTTP MCP servers.
+
+Reason: Google Calendar, Gmail, Spotify, and other external providers need auth
+without leaking provider details into orchestration or prompts. Token lookup and
+headers belong under integrations; policies, traces, and tools should only see
+sanitized execution metadata.
+
+Tradeoff: this is not a full browser OAuth flow yet. Authorization-code login,
+PKCE, refresh-token renewal, and token redaction hardening should land in the
+next auth-focused slice.

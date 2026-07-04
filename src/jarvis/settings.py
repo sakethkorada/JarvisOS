@@ -53,11 +53,16 @@ class McpToolSettings:
 
 @dataclass(frozen=True)
 class McpServerSettings:
-    """Configuration for one MCP stdio server."""
+    """Configuration for one MCP server."""
 
     name: str
-    command: str
+    command: str | None = None
     args: tuple[str, ...] = ()
+    transport: str = "stdio"
+    url: str | None = None
+    headers: dict[str, str] = field(default_factory=dict)
+    auth_provider: str | None = None
+    bearer_token_env: str | None = None
     enabled: bool = True
     risk_level: str = "low"
     requires_approval: bool = False
@@ -69,6 +74,27 @@ class McpSettings:
     """Configured MCP servers that can expose tools."""
 
     servers: tuple[McpServerSettings, ...] = ()
+
+
+@dataclass(frozen=True)
+class OAuthProviderSettings:
+    """OAuth provider metadata for HTTP integrations."""
+
+    name: str
+    client_id: str | None = None
+    client_secret_env: str | None = None
+    authorization_url: str | None = None
+    token_url: str | None = None
+    redirect_uri: str | None = None
+    scopes: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class AuthSettings:
+    """Authentication settings and token storage location."""
+
+    database_path: Path = Path(".jarvis/auth.sqlite3")
+    oauth_providers: tuple[OAuthProviderSettings, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -118,6 +144,7 @@ class JarvisSettings:
     providers: ProviderSettings = field(default_factory=ProviderSettings)
     plugins: PluginSettings = field(default_factory=PluginSettings)
     mcp: McpSettings = field(default_factory=McpSettings)
+    auth: AuthSettings = field(default_factory=AuthSettings)
     memory: MemorySettings = field(default_factory=MemorySettings)
     tasks: TaskSettings = field(default_factory=TaskSettings)
     traces: TraceSettings = field(default_factory=TraceSettings)
@@ -167,6 +194,7 @@ def _settings_from_data(
     ollama_data = _table(provider_data, "ollama")
     plugin_data = _table(data, "plugins")
     mcp_data = _table(data, "mcp")
+    auth_data = _table(data, "auth")
     memory_data = _table(data, "memory")
     task_data = _table(data, "tasks")
     trace_data = _table(data, "traces")
@@ -182,6 +210,11 @@ def _settings_from_data(
         for path in _string_list(plugin_data.get("paths"))
     )
     mcp_servers = tuple(_mcp_servers_from_data(mcp_data))
+    auth_database_path = _resolve_config_path(
+        _optional_string(auth_data.get("database_path")) or ".jarvis/auth.sqlite3",
+        loaded_from,
+    )
+    oauth_providers = tuple(_oauth_providers_from_data(auth_data))
     memory_database_path = _resolve_config_path(
         _optional_string(memory_data.get("database_path")) or ".jarvis/memory.sqlite3",
         loaded_from,
@@ -213,6 +246,10 @@ def _settings_from_data(
         ),
         plugins=PluginSettings(paths=plugin_paths),
         mcp=McpSettings(servers=mcp_servers),
+        auth=AuthSettings(
+            database_path=auth_database_path,
+            oauth_providers=oauth_providers,
+        ),
         memory=MemorySettings(
             database_path=memory_database_path,
             auto_extract=auto_extract,
@@ -254,6 +291,7 @@ def _settings_with_environment(settings: JarvisSettings) -> JarvisSettings:
         ),
         plugins=settings.plugins,
         mcp=settings.mcp,
+        auth=settings.auth,
         memory=settings.memory,
         tasks=settings.tasks,
         traces=settings.traces,
@@ -287,10 +325,21 @@ def _mcp_servers_from_data(data: dict[str, Any]) -> list[McpServerSettings]:
         if not isinstance(item, dict):
             raise ValueError("Expected each MCP server to be a table.")
         name = _optional_string(item.get("name"))
+        if name is None:
+            raise ValueError("MCP servers require name.")
+        transport = _optional_string(item.get("transport")) or "stdio"
+        if transport not in {"stdio", "http"}:
+            raise ValueError("MCP server transport must be stdio or http.")
         command = _optional_string(item.get("command"))
-        if name is None or command is None:
-            raise ValueError("MCP servers require name and command.")
+        url = _optional_string(item.get("url"))
+        if transport == "stdio" and command is None:
+            raise ValueError("MCP stdio servers require command.")
+        if transport == "http" and url is None:
+            raise ValueError("MCP http servers require url.")
         args = tuple(_string_list(item.get("args")))
+        headers = _string_map(_table(item, "headers"))
+        auth_provider = _optional_string(item.get("auth_provider"))
+        bearer_token_env = _optional_string(item.get("bearer_token_env"))
         enabled = _optional_bool(item.get("enabled"), default=True)
         risk_level = _optional_string(item.get("risk_level")) or "low"
         requires_approval = _optional_bool(
@@ -303,6 +352,11 @@ def _mcp_servers_from_data(data: dict[str, Any]) -> list[McpServerSettings]:
                 name=name,
                 command=command,
                 args=args,
+                transport=transport,
+                url=url,
+                headers=headers,
+                auth_provider=auth_provider,
+                bearer_token_env=bearer_token_env,
                 enabled=enabled,
                 risk_level=risk_level,
                 requires_approval=requires_approval,
@@ -310,6 +364,31 @@ def _mcp_servers_from_data(data: dict[str, Any]) -> list[McpServerSettings]:
             )
         )
     return servers
+
+
+def _oauth_providers_from_data(data: dict[str, Any]) -> list[OAuthProviderSettings]:
+    providers: list[OAuthProviderSettings] = []
+    raw_providers = data.get("oauth_providers", [])
+    if not isinstance(raw_providers, list):
+        raise ValueError("Expected [auth].oauth_providers to be a list of tables.")
+    for item in raw_providers:
+        if not isinstance(item, dict):
+            raise ValueError("Expected each OAuth provider to be a table.")
+        name = _optional_string(item.get("name"))
+        if name is None:
+            raise ValueError("OAuth providers require name.")
+        providers.append(
+            OAuthProviderSettings(
+                name=name,
+                client_id=_optional_string(item.get("client_id")),
+                client_secret_env=_optional_string(item.get("client_secret_env")),
+                authorization_url=_optional_string(item.get("authorization_url")),
+                token_url=_optional_string(item.get("token_url")),
+                redirect_uri=_optional_string(item.get("redirect_uri")),
+                scopes=tuple(_string_list(item.get("scopes"))),
+            )
+        )
+    return providers
 
 
 def _mcp_tools_from_data(value: Any) -> list[McpToolSettings]:

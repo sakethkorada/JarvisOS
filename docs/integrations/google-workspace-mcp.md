@@ -1,16 +1,16 @@
 # Google Workspace MCP Notes
 
-JarvisOS currently supports MCP tools over stdio. Google documents official
-Google Workspace MCP servers for Gmail, Drive, Calendar, Chat, and People over
-HTTP with OAuth. That means the official remote Google Calendar MCP server is
-not directly usable until JarvisOS adds an HTTP MCP transport and OAuth handling.
+JarvisOS supports MCP tools over stdio and streamable HTTP. Google documents
+official Google Workspace MCP servers for Gmail, Drive, Calendar, Chat, and
+People over HTTP with OAuth. JarvisOS can now attach bearer tokens from an
+environment variable or the local auth store, but it does not yet run the full
+browser OAuth authorization-code flow or refresh expired tokens automatically.
 
 ## Current Read-Only Calendar Path
 
-For the current stdio-only runtime, use a trusted local Google Calendar or
-Google Workspace MCP server if one is installed locally. Configure it under
-`[[mcp.servers]]`, then use per-tool overrides so read-only tools can run
-automatically while writes require approval.
+Use Google's remote Calendar MCP server or a trusted local Calendar MCP server.
+Configure it under `[[mcp.servers]]`, then use per-tool overrides so read-only
+tools can run automatically while writes require approval.
 
 Useful read-only Calendar tools from Google's documented Workspace MCP surface:
 
@@ -43,10 +43,48 @@ The official Google Workspace MCP servers require:
 
 JarvisOS still needs:
 
-- HTTP MCP transport support,
-- OAuth credential storage/config,
+- browser OAuth authorization-code flow,
 - token refresh handling,
 - redaction rules for sensitive Workspace responses.
+
+Example remote Calendar config:
+
+```toml
+[auth]
+database_path = ".jarvis/auth.sqlite3"
+
+[[auth.oauth_providers]]
+name = "google"
+client_id = "replace-with-google-oauth-client-id"
+client_secret_env = "GOOGLE_OAUTH_CLIENT_SECRET"
+authorization_url = "https://accounts.google.com/o/oauth2/v2/auth"
+token_url = "https://oauth2.googleapis.com/token"
+redirect_uri = "http://localhost:8765/oauth/callback"
+scopes = [
+  "https://www.googleapis.com/auth/calendar.calendarlist.readonly",
+  "https://www.googleapis.com/auth/calendar.events.freebusy",
+  "https://www.googleapis.com/auth/calendar.events.readonly",
+]
+
+[[mcp.servers]]
+name = "google_calendar"
+transport = "http"
+url = "https://calendarmcp.googleapis.com/mcp/v1"
+auth_provider = "google"
+bearer_token_env = "GOOGLE_MCP_ACCESS_TOKEN"
+risk_level = "medium"
+requires_approval = true
+```
+
+For the current slice, provide a bearer token one of two ways:
+
+```powershell
+$env:GOOGLE_MCP_ACCESS_TOKEN="<access-token>"
+python -m jarvis auth set-token google "<access-token>" --config google-calendar.toml
+```
+
+Do not commit local configs that contain client IDs, token references, or other
+private integration details.
 
 ## Near-Term Recommendation
 

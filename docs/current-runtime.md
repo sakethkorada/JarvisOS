@@ -18,7 +18,7 @@ CLI command
   -> step argument reference resolution
   -> deterministic policy checks
   -> approval queue for blocked actions or memory candidates
-  -> mock/local tool execution
+  -> local/plugin/MCP tool execution
   -> synthesis agent
   -> bundled or user-configured synthesis prompt
   -> selected model provider for optional LLM synthesis
@@ -35,7 +35,8 @@ CLI command
   planning if invalid.
 - Planner and synthesis prompts load from bundled markdown files, with optional
   config overrides.
-- Configured MCP stdio servers can expose tools into the shared ToolRegistry.
+- Configured MCP stdio and HTTP servers can expose tools into the shared
+  ToolRegistry.
 - `general.generate_text` can generate intermediate text with the selected
   model before another tool uses it.
 - Plan steps can pass the previous successful tool result's `text` field with
@@ -55,6 +56,9 @@ CLI command
 - MCP server tools can be loaded from `[[mcp.servers]]` config entries.
 - MCP tools can override server-level risk and approval settings with
   `[[mcp.servers.tools]]`.
+- HTTP MCP tools can receive bearer tokens from an environment variable or the
+  local SQLite auth store.
+- `jarvis auth list/set-token/clear` manages stored provider access tokens.
 - `memory.search` uses a local SQLite-backed memory store.
 - `jarvis memory add/search/list` manage local memory records.
 - `task.create` writes low-risk local tasks to SQLite without approval.
@@ -76,10 +80,12 @@ CLI command
 - Calendar search is still a deterministic demo tool. It returns a sample
   Jordan meeting for meeting-prep smoke tests and placeholder output otherwise.
 - Tasks are local SQLite records, not synced to an external task app yet.
-- MCP support currently covers stdio tool discovery/calls. HTTP transports,
-  resources, prompts, and long-lived sessions can come later.
-- Official Google Workspace MCP servers are HTTP/OAuth-based, so JarvisOS needs
-  HTTP MCP transport and OAuth handling before using them directly.
+- MCP support covers stdio and basic streamable HTTP tool discovery/calls.
+  MCP resources, prompts, full SSE streaming, and long-lived sessions can come
+  later.
+- OAuth support currently means provider metadata plus stored/env bearer tokens.
+  Browser authorization-code login and refresh-token renewal are not
+  implemented yet.
 - Deterministic synthesis is still simple, but it includes grounded lines from
   actual tool outputs and acts as the fallback path.
 - `general.generate_text` is the first model-backed internal language
@@ -106,6 +112,9 @@ python -m jarvis traces list --config jarvis.toml.example
 python -m jarvis traces show <run_id> --config jarvis.toml.example
 python -m jarvis approvals list --config jarvis.toml.example
 python -m jarvis approvals show <approval_id> --config jarvis.toml.example
+python -m jarvis auth list --config jarvis.toml.example
+python -m jarvis auth set-token google "<access-token>" --config google-calendar.toml
+python -m jarvis auth clear google --config google-calendar.toml
 python -m jarvis run "Create a task to ask Jordan about API migration" --config jarvis.toml.example --model fake-local
 python -m jarvis tasks list --config jarvis.toml.example
 python -m jarvis tasks complete <task_id> --config jarvis.toml.example
@@ -125,6 +134,11 @@ python -m unittest discover -s tests
 - `--type`, `--source`, and `--limit` configure memory commands.
 - `traces show --json` prints a stored run trace as JSON.
 - `approvals approve <approval_id>` applies supported approved items.
+- `auth set-token <provider> <token>` stores an access token for HTTP
+  integrations.
+- `auth list` shows which providers have stored tokens without printing secret
+  values.
+- `auth clear <provider>` deletes a stored token.
 - `tasks list --limit N` prints recent local tasks.
 - `tasks show <task_id>` prints one task.
 - `tasks complete <task_id>` marks one task done.

@@ -1,7 +1,11 @@
 import unittest
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import sys
+from threading import Thread
+import json
 
 from jarvis.contracts import ToolCall, ToolExecutionContext
 from jarvis.contracts import ModelRequest, ModelResponse
@@ -16,7 +20,8 @@ from jarvis.runtime import create_default_tool_registry
 from jarvis.settings import McpServerSettings, load_settings
 from jarvis.storage.approvals import ApprovalStore, apply_approved_record
 from jarvis.storage.memory import MemoryExtractor, MemoryStore
-from jarvis.integrations.mcp import McpStdioClient
+from jarvis.integrations.mcp import McpHttpClient, McpStdioClient
+from jarvis.storage.auth import AuthStore
 from jarvis.storage.tasks import TaskStore
 from jarvis.tools import default_tool_registry
 from jarvis.storage.traces import TraceStore
@@ -380,6 +385,56 @@ requires_approval = false
         self.assertEqual(len(settings.mcp.servers), 1)
         self.assertEqual(settings.mcp.servers[0].name, "demo_mcp")
         self.assertEqual(settings.mcp.servers[0].args, ("demo_server.py",))
+        self.assertEqual(settings.mcp.servers[0].transport, "stdio")
+
+    def test_loads_http_mcp_server_and_oauth_settings_from_toml(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "jarvis.toml"
+            config_path.write_text(
+                """
+[auth]
+database_path = "state/auth.sqlite3"
+
+[[auth.oauth_providers]]
+name = "google"
+client_id = "client-id"
+client_secret_env = "GOOGLE_CLIENT_SECRET"
+authorization_url = "https://accounts.google.com/o/oauth2/v2/auth"
+token_url = "https://oauth2.googleapis.com/token"
+redirect_uri = "http://localhost:8765/oauth/callback"
+scopes = ["https://www.googleapis.com/auth/calendar.events.readonly"]
+
+[[mcp.servers]]
+name = "google_calendar"
+transport = "http"
+url = "https://calendarmcp.googleapis.com/mcp/v1"
+auth_provider = "google"
+bearer_token_env = "GOOGLE_MCP_ACCESS_TOKEN"
+
+[mcp.servers.headers]
+X-Test = "1"
+""".strip(),
+                encoding="utf-8",
+            )
+
+            settings = load_settings(config_path)
+
+        self.assertEqual(
+            settings.auth.database_path,
+            Path(temp_dir) / "state" / "auth.sqlite3",
+        )
+        self.assertEqual(settings.auth.oauth_providers[0].name, "google")
+        self.assertEqual(
+            settings.auth.oauth_providers[0].scopes,
+            ("https://www.googleapis.com/auth/calendar.events.readonly",),
+        )
+        server = settings.mcp.servers[0]
+        self.assertEqual(server.transport, "http")
+        self.assertEqual(server.url, "https://calendarmcp.googleapis.com/mcp/v1")
+        self.assertEqual(server.auth_provider, "google")
+        self.assertEqual(server.bearer_token_env, "GOOGLE_MCP_ACCESS_TOKEN")
+        self.assertEqual(server.headers["X-Test"], "1")
 
     def test_loads_mcp_tool_policy_overrides_from_toml(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -897,6 +952,27 @@ paths = ["{plugin_path.name}"]
         self.assertEqual(result.output["matches"][0]["title"], "Jordan meeting")
 
 
+class AuthStoreTests(unittest.TestCase):
+    """Tests for local integration auth storage."""
+
+    def test_auth_store_sets_lists_and_clears_tokens(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            store = AuthStore(Path(temp_dir) / "auth.sqlite3")
+
+            record = store.set_token("google", "access", refresh_token="refresh")
+            listed = store.list_tokens()
+            loaded = store.get_token("google")
+            cleared = store.clear_token("google")
+
+        self.assertEqual(record.provider, "google")
+        self.assertEqual(record.access_token, "access")
+        self.assertEqual(len(listed), 1)
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        self.assertEqual(loaded.refresh_token, "refresh")
+        self.assertTrue(cleared)
+
+
 class McpTests(unittest.TestCase):
     """Tests for MCP stdio tool loading and execution."""
 
@@ -909,6 +985,68 @@ class McpTests(unittest.TestCase):
 
         self.assertEqual(tools[0]["name"], "echo")
         self.assertEqual(result["content"][0]["text"], "demo echo: hello")
+
+    def test_http_mcp_client_lists_and_calls_demo_tool(self) -> None:
+        with _http_mcp_server() as server_url:
+            server = McpServerSettings(
+                name="http_demo",
+                transport="http",
+                url=server_url,
+            )
+            client = McpHttpClient(server)
+
+            tools = client.list_tools()
+            result = client.call_tool("echo", {"text": "hello http"})
+
+        self.assertEqual(tools[0]["name"], "echo")
+        self.assertEqual(result["content"][0]["text"], "http demo echo: hello http")
+
+    def test_http_mcp_client_uses_stored_oauth_token(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            auth_store = AuthStore(Path(temp_dir) / "auth.sqlite3")
+            auth_store.set_token("demo_oauth", _HttpMcpHandler.required_token)
+            with _http_mcp_server(require_token=True) as server_url:
+                server = McpServerSettings(
+                    name="http_demo",
+                    transport="http",
+                    url=server_url,
+                    auth_provider="demo_oauth",
+                )
+                client = McpHttpClient(server, auth_store)
+
+                result = client.call_tool("echo", {"text": "authorized"})
+
+        self.assertEqual(
+            result["content"][0]["text"],
+            "http demo echo: authorized",
+        )
+
+    def test_http_mcp_tool_is_registered_from_settings(self) -> None:
+        with _http_mcp_server() as server_url:
+            with TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                config_path = root / "jarvis.toml"
+                config_path.write_text(
+                    f"""
+[[mcp.servers]]
+name = "http_demo"
+transport = "http"
+url = "{server_url}"
+""".strip(),
+                    encoding="utf-8",
+                )
+                settings = load_settings(config_path)
+
+                registry = create_default_tool_registry(settings)
+                result = registry.execute(
+                    ToolCall("http_demo.echo", {"text": "from http registry"})
+                )
+
+        self.assertTrue(result.success)
+        self.assertEqual(
+            result.output["text"],
+            "http demo echo: from http registry",
+        )
 
     def test_mcp_tool_is_registered_from_settings(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1216,6 +1354,106 @@ def _demo_mcp_server_settings() -> McpServerSettings:
 
 def _demo_mcp_server_path() -> Path:
     return Path(__file__).resolve().parents[1] / "examples" / "mcp" / "demo_server.py"
+
+
+@contextmanager
+def _http_mcp_server(require_token: bool = False):
+    _HttpMcpHandler.require_token = require_token
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _HttpMcpHandler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        yield f"http://{host}:{port}/mcp"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+        _HttpMcpHandler.require_token = False
+
+
+class _HttpMcpHandler(BaseHTTPRequestHandler):
+    """Local streamable HTTP MCP test server."""
+
+    required_token = "test-access-token"
+    require_token = False
+
+    def do_POST(self) -> None:
+        if self.path != "/mcp":
+            self.send_error(404)
+            return
+        if self.require_token:
+            expected = f"Bearer {self.required_token}"
+            if self.headers.get("Authorization") != expected:
+                self.send_response(401)
+                self.send_header(
+                    "WWW-Authenticate",
+                    'Bearer resource_metadata="http://127.0.0.1/.well-known/oauth"',
+                )
+                self.end_headers()
+                return
+        length = int(self.headers.get("Content-Length", "0"))
+        request = json.loads(self.rfile.read(length).decode("utf-8"))
+        method = request.get("method")
+        if method == "notifications/initialized":
+            self.send_response(202)
+            self.end_headers()
+            return
+        result = self._result_for_request(method, request.get("params", {}))
+        response = {
+            "jsonrpc": "2.0",
+            "id": request.get("id"),
+            "result": result,
+        }
+        payload = json.dumps(response).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Mcp-Session-Id", "session-test")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, format: str, *args) -> None:
+        return
+
+    def _result_for_request(
+        self,
+        method: str | None,
+        params: dict[str, object],
+    ) -> dict[str, object]:
+        if method == "initialize":
+            return {
+                "protocolVersion": "2025-03-26",
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "http-demo", "version": "0.1.0"},
+            }
+        if method == "tools/list":
+            return {
+                "tools": [
+                    {
+                        "name": "echo",
+                        "description": "Echo text over HTTP MCP.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {"text": {"type": "string"}},
+                        },
+                    }
+                ]
+            }
+        if method == "tools/call":
+            arguments = params.get("arguments", {})
+            text = ""
+            if isinstance(arguments, dict):
+                text = str(arguments.get("text", ""))
+            return {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": f"http demo echo: {text}",
+                    }
+                ]
+            }
+        return {}
 
 
 class StaticModelProvider(ModelProvider):

@@ -1,14 +1,18 @@
-"""MCP stdio tool loading for JarvisOS."""
+"""MCP tool loading for stdio and HTTP servers."""
 
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from jarvis.contracts import ToolSpec
 from jarvis.settings import McpServerSettings
+from jarvis.storage.auth import AuthStore
 from jarvis.tools.registry import ToolRegistry
 
 
@@ -22,6 +26,7 @@ class McpToolBinding:
     server: McpServerSettings
     mcp_tool_name: str
     jarvis_tool_name: str
+    auth_store: AuthStore | None = None
 
 
 class McpStdioClient:
@@ -54,6 +59,138 @@ class McpStdioClient:
                     "arguments": arguments,
                 },
             )
+
+
+class McpHttpClient:
+    """Small synchronous MCP client for streamable HTTP servers."""
+
+    def __init__(
+        self,
+        server: McpServerSettings,
+        auth_store: AuthStore | None = None,
+        timeout_seconds: float = 10,
+    ) -> None:
+        if server.url is None:
+            raise ValueError("HTTP MCP server requires url.")
+        self._server = server
+        self._auth_store = auth_store
+        self._timeout_seconds = timeout_seconds
+        self._next_id = 1
+        self._session_id: str | None = None
+
+    def list_tools(self) -> list[dict[str, Any]]:
+        """Return MCP tool definitions exposed by the configured server."""
+        self.initialize()
+        response = self.request("tools/list", {})
+        tools = response.get("tools", [])
+        return [tool for tool in tools if isinstance(tool, dict)]
+
+    def call_tool(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Call one MCP tool and return the raw MCP result."""
+        self.initialize()
+        return self.request(
+            "tools/call",
+            {
+                "name": tool_name,
+                "arguments": arguments,
+            },
+        )
+
+    def initialize(self) -> None:
+        """Perform the MCP initialize handshake."""
+        self.request(
+            "initialize",
+            {
+                "protocolVersion": PROTOCOL_VERSION,
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "JarvisOS",
+                    "version": "0.1.0",
+                },
+            },
+        )
+        self.notify("notifications/initialized", {})
+
+    def request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        """Send a JSON-RPC request over HTTP and return the result object."""
+        request_id = self._next_id
+        self._next_id += 1
+        message = {
+            "jsonrpc": "2.0",
+            "id": request_id,
+            "method": method,
+            "params": params,
+        }
+        response = self._post_message(message)
+        if response.get("id") != request_id:
+            raise RuntimeError("MCP HTTP response id did not match request id.")
+        error = response.get("error")
+        if error is not None:
+            raise RuntimeError(f"MCP request failed: {error}")
+        result = response.get("result", {})
+        if not isinstance(result, dict):
+            raise RuntimeError("MCP response result must be an object.")
+        return result
+
+    def notify(self, method: str, params: dict[str, Any]) -> None:
+        """Send a JSON-RPC notification over HTTP."""
+        self._post_message(
+            {
+                "jsonrpc": "2.0",
+                "method": method,
+                "params": params,
+            },
+            allow_empty=True,
+        )
+
+    def _post_message(
+        self,
+        message: dict[str, Any],
+        allow_empty: bool = False,
+    ) -> dict[str, Any]:
+        assert self._server.url is not None
+        headers = {
+            "Accept": "application/json, text/event-stream",
+            "Content-Type": "application/json",
+            **self._server.headers,
+        }
+        if self._session_id is not None:
+            headers["Mcp-Session-Id"] = self._session_id
+        token = _bearer_token(self._server, self._auth_store)
+        if token is not None:
+            headers["Authorization"] = f"Bearer {token}"
+        body = json.dumps(message, separators=(",", ":")).encode("utf-8")
+        request = Request(
+            self._server.url,
+            data=body,
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=self._timeout_seconds) as response:
+                session_id = response.headers.get("Mcp-Session-Id")
+                if session_id:
+                    self._session_id = session_id
+                payload = response.read().decode("utf-8")
+                content_type = response.headers.get("Content-Type", "")
+        except HTTPError as exc:
+            raise RuntimeError(_http_error_message(exc)) from exc
+        except URLError as exc:
+            raise RuntimeError(f"MCP HTTP request failed: {exc.reason}") from exc
+        if not payload.strip():
+            if allow_empty:
+                return {}
+            raise RuntimeError("MCP HTTP response was empty.")
+        if "text/event-stream" in content_type:
+            return _parse_sse_response(payload)
+        decoded = json.loads(payload)
+        if not isinstance(decoded, dict):
+            raise RuntimeError("MCP HTTP response must be a JSON object.")
+        return decoded
 
 
 class McpSession:
@@ -158,12 +295,13 @@ class _mcp_process:
 def load_mcp_tools(
     servers: tuple[McpServerSettings, ...],
     registry: ToolRegistry,
+    auth_store: AuthStore | None = None,
 ) -> None:
     """Load tools from configured MCP servers into the tool registry."""
     for server in servers:
         if not server.enabled:
             continue
-        client = McpStdioClient(server)
+        client = _mcp_client(server, auth_store)
         for tool in client.list_tools():
             mcp_name = str(tool.get("name", "")).strip()
             if not mcp_name:
@@ -176,6 +314,7 @@ def load_mcp_tools(
                 server=server,
                 mcp_tool_name=mcp_name,
                 jarvis_tool_name=jarvis_name,
+                auth_store=auth_store,
             )
             risk_level, requires_approval = _mcp_tool_policy(
                 server,
@@ -218,9 +357,48 @@ def _execute_mcp_tool(
     binding: McpToolBinding,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    client = McpStdioClient(binding.server)
+    client = _mcp_client(binding.server, binding.auth_store)
     result = client.call_tool(binding.mcp_tool_name, arguments)
     return _normalize_mcp_result(result)
+
+
+def _mcp_client(
+    server: McpServerSettings,
+    auth_store: AuthStore | None,
+) -> McpStdioClient | McpHttpClient:
+    """Create the right MCP client for a configured server."""
+    if server.transport == "http":
+        return McpHttpClient(server, auth_store)
+    return McpStdioClient(server)
+
+
+def _bearer_token(
+    server: McpServerSettings,
+    auth_store: AuthStore | None,
+) -> str | None:
+    """Resolve a bearer token from environment or local auth storage."""
+    if server.bearer_token_env:
+        token = os.getenv(server.bearer_token_env)
+        if token:
+            return token
+    if server.auth_provider and auth_store is not None:
+        record = auth_store.get_token(server.auth_provider)
+        if record is not None:
+            return record.access_token
+    return None
+
+
+def _http_error_message(error: HTTPError) -> str:
+    authenticate = error.headers.get("WWW-Authenticate", "")
+    detail = error.read().decode("utf-8", errors="replace").strip()
+    if authenticate:
+        return (
+            f"MCP HTTP request failed with {error.code}; "
+            f"authentication challenge: {authenticate}"
+        )
+    if detail:
+        return f"MCP HTTP request failed with {error.code}: {detail}"
+    return f"MCP HTTP request failed with {error.code}."
 
 
 def _normalize_mcp_result(result: dict[str, Any]) -> dict[str, Any]:
@@ -241,6 +419,20 @@ def _content_to_text(content: Any) -> str:
         if item.get("type") == "text":
             parts.append(str(item.get("text", "")))
     return "\n".join(part for part in parts if part)
+
+
+def _parse_sse_response(payload: str) -> dict[str, Any]:
+    """Parse the first JSON-RPC object from a simple SSE response."""
+    data_lines: list[str] = []
+    for line in payload.splitlines():
+        if line.startswith("data:"):
+            data_lines.append(line[5:].strip())
+    if not data_lines:
+        raise RuntimeError("MCP SSE response did not contain data lines.")
+    decoded = json.loads("\n".join(data_lines))
+    if not isinstance(decoded, dict):
+        raise RuntimeError("MCP SSE data must contain a JSON object.")
+    return decoded
 
 
 def _write_message(

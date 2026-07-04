@@ -20,6 +20,7 @@ from jarvis.runtime import (
 )
 from jarvis.settings import load_settings
 from jarvis.storage.approvals import apply_approved_record
+from jarvis.storage.auth import AuthStore
 from jarvis.storage.memory import MemoryStore
 from jarvis.storage.traces import TraceSummary
 
@@ -182,6 +183,26 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     approvals_reject.add_argument("approval_id", help="Approval id to reject.")
     approvals_reject.add_argument("--config", type=Path, help="Path to config.")
+
+    auth_parser = subparsers.add_parser("auth", help="Manage integration auth.")
+    auth_subparsers = auth_parser.add_subparsers(
+        dest="auth_command",
+        required=True,
+    )
+    auth_list = auth_subparsers.add_parser("list", help="List stored auth tokens.")
+    auth_list.add_argument("--config", type=Path, help="Path to config.")
+    auth_set = auth_subparsers.add_parser(
+        "set-token",
+        help="Store a bearer access token for an OAuth provider.",
+    )
+    auth_set.add_argument("provider", help="Provider name from config.")
+    auth_set.add_argument("access_token", help="Bearer access token.")
+    auth_set.add_argument("--refresh-token", help="Optional refresh token.")
+    auth_set.add_argument("--expires-at", help="Optional token expiry timestamp.")
+    auth_set.add_argument("--config", type=Path, help="Path to config.")
+    auth_clear = auth_subparsers.add_parser("clear", help="Clear stored provider auth.")
+    auth_clear.add_argument("provider", help="Provider name to clear.")
+    auth_clear.add_argument("--config", type=Path, help="Path to config.")
     return parser
 
 
@@ -332,6 +353,33 @@ def main() -> None:
                 parser.error(str(exc))
                 return
             _print_approval_record(record)
+            return
+
+    if args.command == "auth":
+        settings = load_settings(args.config)
+        auth_store = AuthStore(settings.auth.database_path)
+        if args.auth_command == "list":
+            for record in auth_store.list_tokens():
+                refresh = "yes" if record.refresh_token else "no"
+                expires = record.expires_at or "unknown"
+                print(
+                    f"{record.provider}: token=stored "
+                    f"refresh_token={refresh} expires_at={expires}"
+                )
+            return
+        if args.auth_command == "set-token":
+            record = auth_store.set_token(
+                args.provider,
+                args.access_token,
+                refresh_token=args.refresh_token,
+                expires_at=args.expires_at,
+            )
+            print(f"{record.provider}: token=stored updated_at={record.updated_at}")
+            return
+        if args.auth_command == "clear":
+            deleted = auth_store.clear_token(args.provider)
+            status = "cleared" if deleted else "not found"
+            print(f"{args.provider}: {status}")
             return
 
     parser.error(f"Unknown command: {args.command}")

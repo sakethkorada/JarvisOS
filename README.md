@@ -327,9 +327,10 @@ requires_approval = false
 
 ## MCP Tools
 
-JarvisOS can load tools from local MCP stdio servers. MCP tools are normalized
-into the same internal tool registry as built-ins and plugins, so the planner,
-policy engine, trace store, and synthesis layer treat them the same way.
+JarvisOS can load tools from local MCP stdio servers and remote streamable HTTP
+MCP servers. MCP tools are normalized into the same internal tool registry as
+built-ins and plugins, so the planner, policy engine, trace store, and synthesis
+layer treat them the same way.
 
 Example config:
 
@@ -341,6 +342,32 @@ args = ["examples/mcp/demo_server.py"]
 risk_level = "low"
 requires_approval = false
 ```
+
+HTTP MCP servers use `transport = "http"` and `url`:
+
+```toml
+[[mcp.servers]]
+name = "google_calendar"
+transport = "http"
+url = "https://calendarmcp.googleapis.com/mcp/v1"
+auth_provider = "google"
+bearer_token_env = "GOOGLE_MCP_ACCESS_TOKEN"
+risk_level = "medium"
+requires_approval = true
+```
+
+Bearer auth can come from an environment variable or the local auth store:
+
+```powershell
+$env:GOOGLE_MCP_ACCESS_TOKEN="<access-token>"
+python -m jarvis auth set-token google "<access-token>" --config google-calendar.toml
+python -m jarvis auth list --config google-calendar.toml
+python -m jarvis auth clear google --config google-calendar.toml
+```
+
+The current auth layer stores provider tokens and supplies bearer headers to
+HTTP MCP. Full browser OAuth authorization-code flow and refresh handling are
+the next auth slice.
 
 Per-tool policy overrides can make read-only tools auto-allowed while writes
 remain approval-gated:
@@ -375,9 +402,7 @@ that text came from `general.generate_text`; the MCP tool then acted on the
 generated text.
 
 See `docs/integrations/google-workspace-mcp.md` for the current Google
-Workspace MCP notes. JarvisOS supports stdio MCP today; Google's official
-Workspace MCP servers are HTTP/OAuth-based, so they need an HTTP MCP transport
-and OAuth handling before they can be used directly.
+Workspace MCP notes.
 
 ## Local Memory
 
