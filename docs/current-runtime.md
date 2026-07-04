@@ -14,6 +14,7 @@ CLI command
   -> selected model provider for optional LLM planning
   -> deterministic plan validation or fallback
   -> deterministic policy checks
+  -> approval queue for blocked actions or memory candidates
   -> mock/local tool execution
   -> synthesis agent
   -> bundled or user-configured synthesis prompt
@@ -45,9 +46,15 @@ CLI command
 - Local plugin folders can be loaded from configured plugin paths.
 - `memory.search` uses a local SQLite-backed memory store.
 - `jarvis memory add/search/list` manage local memory records.
+- `task.create` writes low-risk local tasks to SQLite without approval.
+- `jarvis tasks list` prints recent local tasks.
 - Memory records persist across sessions for the configured SQLite database.
 - Run traces persist to SQLite when `[traces].enabled = true`.
 - `jarvis traces list/show` inspect stored runs and event timelines.
+- `jarvis approvals list/show/approve/reject` manage pending approvals.
+- Suggested memory candidates are queued for approval instead of being saved
+  silently.
+- Approved `memory.add` records are written to the configured memory store.
 - End-of-run memory extraction is suggest-only and does not auto-save memories.
 - The JSON output includes trace events, tool results, plan steps, and final
   status.
@@ -56,8 +63,11 @@ CLI command
 
 - Calendar search is still a deterministic demo tool. It returns a sample
   Jordan meeting for meeting-prep smoke tests and placeholder output otherwise.
+- Tasks are local SQLite records, not synced to an external task app yet.
 - Deterministic synthesis is still simple, but it includes grounded lines from
   actual tool outputs and acts as the fallback path.
+- Tool execution approvals can be recorded, but approved tool calls are not
+  automatically resumed yet.
 - Online plugin acquisition is not implemented yet. Future online plugins should
   be downloaded into local plugin folders before runtime loading.
 
@@ -74,6 +84,10 @@ python -m jarvis run "find notes about Jordan" --config jarvis.toml.example
 python -m jarvis run "find notes about Jordan and summarize what you know" --config jarvis.toml.example --model "ollama/llama3.2:3b"
 python -m jarvis traces list --config jarvis.toml.example
 python -m jarvis traces show <run_id> --config jarvis.toml.example
+python -m jarvis approvals list --config jarvis.toml.example
+python -m jarvis approvals show <approval_id> --config jarvis.toml.example
+python -m jarvis run "Create a task to ask Jordan about API migration" --config jarvis.toml.example --model fake-local
+python -m jarvis tasks list --config jarvis.toml.example
 python -m jarvis run "prepare me for my meeting tomorrow" --model "ollama/llama3.2:3b"
 python -m jarvis run "prepare me for my meeting tomorrow" --mode private
 python -m jarvis run "prepare me for my meeting tomorrow" --model "ollama/llama3.2:3b" --json
@@ -88,3 +102,5 @@ python -m unittest discover -s tests
 - `--mode` resolves a model from settings.
 - `--type`, `--source`, and `--limit` configure memory commands.
 - `traces show --json` prints a stored run trace as JSON.
+- `approvals approve <approval_id>` applies supported approved items.
+- `tasks list --limit N` prints recent local tasks.

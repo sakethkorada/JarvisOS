@@ -52,11 +52,25 @@ class MemorySettings:
 
 
 @dataclass(frozen=True)
+class TaskSettings:
+    """Local task persistence settings."""
+
+    database_path: Path = Path(".jarvis/tasks.sqlite3")
+
+
+@dataclass(frozen=True)
 class TraceSettings:
     """Trace persistence settings."""
 
     database_path: Path = Path(".jarvis/traces.sqlite3")
     enabled: bool = True
+
+
+@dataclass(frozen=True)
+class ApprovalSettings:
+    """Approval queue persistence settings."""
+
+    database_path: Path = Path(".jarvis/approvals.sqlite3")
 
 
 @dataclass(frozen=True)
@@ -75,7 +89,9 @@ class JarvisSettings:
     providers: ProviderSettings = field(default_factory=ProviderSettings)
     plugins: PluginSettings = field(default_factory=PluginSettings)
     memory: MemorySettings = field(default_factory=MemorySettings)
+    tasks: TaskSettings = field(default_factory=TaskSettings)
     traces: TraceSettings = field(default_factory=TraceSettings)
+    approvals: ApprovalSettings = field(default_factory=ApprovalSettings)
     prompts: PromptSettings = field(default_factory=PromptSettings)
     loaded_from: Path | None = None
 
@@ -121,7 +137,9 @@ def _settings_from_data(
     ollama_data = _table(provider_data, "ollama")
     plugin_data = _table(data, "plugins")
     memory_data = _table(data, "memory")
+    task_data = _table(data, "tasks")
     trace_data = _table(data, "traces")
+    approval_data = _table(data, "approvals")
     prompt_data = _table(data, "prompts")
 
     modes = _string_map(_table(model_data, "modes"))
@@ -138,11 +156,20 @@ def _settings_from_data(
     )
     auto_extract = _optional_bool(memory_data.get("auto_extract"), default=True)
     auto_write = _optional_bool(memory_data.get("auto_write"), default=False)
+    task_database_path = _resolve_config_path(
+        _optional_string(task_data.get("database_path")) or ".jarvis/tasks.sqlite3",
+        loaded_from,
+    )
     trace_database_path = _resolve_config_path(
         _optional_string(trace_data.get("database_path")) or ".jarvis/traces.sqlite3",
         loaded_from,
     )
     traces_enabled = _optional_bool(trace_data.get("enabled"), default=True)
+    approval_database_path = _resolve_config_path(
+        _optional_string(approval_data.get("database_path"))
+        or ".jarvis/approvals.sqlite3",
+        loaded_from,
+    )
     planner_prompt_path = _optional_path(prompt_data.get("planner"), loaded_from)
     synthesis_prompt_path = _optional_path(prompt_data.get("synthesis"), loaded_from)
 
@@ -158,10 +185,12 @@ def _settings_from_data(
             auto_extract=auto_extract,
             auto_write=auto_write,
         ),
+        tasks=TaskSettings(database_path=task_database_path),
         traces=TraceSettings(
             database_path=trace_database_path,
             enabled=traces_enabled,
         ),
+        approvals=ApprovalSettings(database_path=approval_database_path),
         prompts=PromptSettings(
             planner_path=planner_prompt_path,
             synthesis_path=synthesis_prompt_path,
@@ -192,7 +221,9 @@ def _settings_with_environment(settings: JarvisSettings) -> JarvisSettings:
         ),
         plugins=settings.plugins,
         memory=settings.memory,
+        tasks=settings.tasks,
         traces=settings.traces,
+        approvals=settings.approvals,
         prompts=settings.prompts,
         loaded_from=settings.loaded_from,
     )

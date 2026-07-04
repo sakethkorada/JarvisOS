@@ -2,6 +2,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from jarvis.approvals import ApprovalStore, apply_approved_record
 from jarvis.contracts import ToolCall
 from jarvis.contracts import ModelRequest, ModelResponse
 from jarvis.errors import ModelProviderError
@@ -13,6 +14,7 @@ from jarvis.prompts import PromptLibrary
 from jarvis.runtime import create_default_orchestrator
 from jarvis.runtime import create_default_tool_registry
 from jarvis.settings import load_settings
+from jarvis.tasks import TaskStore
 from jarvis.tools import default_tool_registry
 from jarvis.traces import TraceStore
 
@@ -121,6 +123,61 @@ auto_extract = false
             memory_result.output["matches"][0]["content"],
             "User prefers meetings after 10 AM.",
         )
+
+    def test_memory_candidate_creates_pending_approval(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "jarvis.toml"
+            memory_path = root / "memory.sqlite3"
+            approval_path = root / "approvals.sqlite3"
+            config_path.write_text(
+                f"""
+[memory]
+database_path = "{memory_path.name}"
+auto_extract = true
+
+[approvals]
+database_path = "{approval_path.name}"
+""".strip(),
+                encoding="utf-8",
+            )
+            settings = load_settings(config_path)
+
+            result = create_default_orchestrator(settings).run(
+                "Remember that I prefer meetings after 10 AM.",
+                model_name="fake-local",
+            )
+            approvals = ApprovalStore(settings.approvals.database_path).list()
+
+        self.assertEqual(len(approvals), 1)
+        self.assertEqual(approvals[0].type, "memory.add")
+        self.assertEqual(approvals[0].run_id, result.run_id)
+        self.assertIn(approvals[0].id, result.final_response)
+
+    def test_task_create_goal_writes_local_task(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "jarvis.toml"
+            task_path = root / "tasks.sqlite3"
+            config_path.write_text(
+                f"""
+[tasks]
+database_path = "{task_path.name}"
+""".strip(),
+                encoding="utf-8",
+            )
+            settings = load_settings(config_path)
+
+            result = create_default_orchestrator(settings).run(
+                "Create a task to ask Jordan about API migration",
+                model_name="fake-local",
+            )
+            tasks = TaskStore(settings.tasks.database_path).list()
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(len(tasks), 1)
+        self.assertIn("ask Jordan about API migration", tasks[0].title)
+        self.assertIn("task.create", [item.tool_name for item in result.step_results])
 
 
 class SettingsTests(unittest.TestCase):
@@ -239,6 +296,44 @@ enabled = false
         )
         self.assertFalse(settings.traces.enabled)
 
+    def test_loads_approval_settings_from_toml(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "jarvis.toml"
+            config_path.write_text(
+                """
+[approvals]
+database_path = "state/approvals.sqlite3"
+""".strip(),
+                encoding="utf-8",
+            )
+
+            settings = load_settings(config_path)
+
+        self.assertEqual(
+            settings.approvals.database_path,
+            Path(temp_dir) / "state" / "approvals.sqlite3",
+        )
+
+    def test_loads_task_settings_from_toml(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "jarvis.toml"
+            config_path.write_text(
+                """
+[tasks]
+database_path = "state/tasks.sqlite3"
+""".strip(),
+                encoding="utf-8",
+            )
+
+            settings = load_settings(config_path)
+
+        self.assertEqual(
+            settings.tasks.database_path,
+            Path(temp_dir) / "state" / "tasks.sqlite3",
+        )
+
     def test_loads_prompt_override_paths_from_toml(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -302,6 +397,66 @@ class MemoryTests(unittest.TestCase):
 
         self.assertEqual(len(candidates), 1)
         self.assertEqual(candidates[0].type, "preference")
+
+
+class TaskTests(unittest.TestCase):
+    """Tests for local SQLite task storage."""
+
+    def test_create_and_list_tasks(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            task_store = TaskStore(Path(temp_dir) / "tasks.sqlite3")
+            task_store.create("Ask Jordan about API migration.")
+
+            tasks = task_store.list()
+
+        self.assertEqual(len(tasks), 1)
+        self.assertEqual(tasks[0].status, "open")
+        self.assertEqual(tasks[0].title, "Ask Jordan about API migration.")
+
+
+class ApprovalTests(unittest.TestCase):
+    """Tests for local SQLite approval storage."""
+
+    def test_create_approve_and_apply_memory_approval(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approval_store = ApprovalStore(root / "approvals.sqlite3")
+            memory_store = MemoryStore(root / "memory.sqlite3")
+            record = approval_store.create(
+                approval_type="memory.add",
+                title="Save memory",
+                reason="The user stated an explicit preference.",
+                payload={
+                    "memory_type": "preference",
+                    "content": "User prefers meetings after 10 AM.",
+                    "source": "run",
+                },
+                run_id="run_test",
+            )
+
+            approved = approval_store.decide(record.id, "approved")
+            effect = apply_approved_record(approved, memory_store)
+            memories = memory_store.search("meetings")
+
+        self.assertEqual(approved.status, "approved")
+        self.assertEqual(effect, "Memory saved.")
+        self.assertEqual(len(memories), 1)
+        self.assertEqual(memories[0].type, "preference")
+
+    def test_reject_approval_records_decision(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            approval_store = ApprovalStore(Path(temp_dir) / "approvals.sqlite3")
+            record = approval_store.create(
+                approval_type="tool.execute",
+                title="Approve tool",
+                reason="High risk.",
+                payload={"tool_name": "email.send"},
+            )
+
+            rejected = approval_store.decide(record.id, "rejected")
+
+        self.assertEqual(rejected.status, "rejected")
+        self.assertIsNotNone(rejected.decided_at)
 
 
 class PromptTests(unittest.TestCase):

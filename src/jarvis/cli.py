@@ -8,12 +8,15 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
+from jarvis.approvals import apply_approved_record
 from jarvis.agents import default_agent_registry
-from jarvis.contracts import MemoryRecord
+from jarvis.contracts import ApprovalRecord, MemoryRecord
 from jarvis.memory import MemoryStore
 from jarvis.models import default_model_router
 from jarvis.runtime import (
+    create_default_approval_store,
     create_default_orchestrator,
+    create_default_task_store,
     create_default_tool_registry,
     create_default_trace_store,
 )
@@ -105,6 +108,15 @@ def _build_parser() -> argparse.ArgumentParser:
     memory_list.add_argument("--limit", type=int, default=20, help="Result limit.")
     memory_list.add_argument("--config", type=Path, help="Path to config.")
 
+    tasks_parser = subparsers.add_parser("tasks", help="Manage local tasks.")
+    tasks_subparsers = tasks_parser.add_subparsers(
+        dest="tasks_command",
+        required=True,
+    )
+    tasks_list = tasks_subparsers.add_parser("list", help="List recent tasks.")
+    tasks_list.add_argument("--limit", type=int, default=20, help="Result limit.")
+    tasks_list.add_argument("--config", type=Path, help="Path to config.")
+
     traces_parser = subparsers.add_parser("traces", help="Inspect stored traces.")
     traces_subparsers = traces_parser.add_subparsers(
         dest="traces_command",
@@ -118,6 +130,49 @@ def _build_parser() -> argparse.ArgumentParser:
     traces_show.add_argument("run_id", help="Run id to inspect.")
     traces_show.add_argument("--json", action="store_true", help="Print JSON.")
     traces_show.add_argument("--config", type=Path, help="Path to config.")
+
+    approvals_parser = subparsers.add_parser(
+        "approvals",
+        help="Inspect and decide pending approvals.",
+    )
+    approvals_subparsers = approvals_parser.add_subparsers(
+        dest="approvals_command",
+        required=True,
+    )
+    approvals_list = approvals_subparsers.add_parser(
+        "list",
+        help="List approval records.",
+    )
+    approvals_list.add_argument(
+        "--status",
+        choices=("pending", "approved", "rejected", "all"),
+        default="pending",
+        help="Approval status to list.",
+    )
+    approvals_list.add_argument("--limit", type=int, default=20, help="Result limit.")
+    approvals_list.add_argument("--config", type=Path, help="Path to config.")
+
+    approvals_show = approvals_subparsers.add_parser(
+        "show",
+        help="Show one approval record.",
+    )
+    approvals_show.add_argument("approval_id", help="Approval id to inspect.")
+    approvals_show.add_argument("--json", action="store_true", help="Print JSON.")
+    approvals_show.add_argument("--config", type=Path, help="Path to config.")
+
+    approvals_approve = approvals_subparsers.add_parser(
+        "approve",
+        help="Approve an item.",
+    )
+    approvals_approve.add_argument("approval_id", help="Approval id to approve.")
+    approvals_approve.add_argument("--config", type=Path, help="Path to config.")
+
+    approvals_reject = approvals_subparsers.add_parser(
+        "reject",
+        help="Reject an item.",
+    )
+    approvals_reject.add_argument("approval_id", help="Approval id to reject.")
+    approvals_reject.add_argument("--config", type=Path, help="Path to config.")
     return parser
 
 
@@ -191,6 +246,15 @@ def main() -> None:
                 _print_memory_record(record)
             return
 
+    if args.command == "tasks":
+        settings = load_settings(args.config)
+        task_store = create_default_task_store(settings)
+        if args.tasks_command == "list":
+            for record in task_store.list(limit=args.limit):
+                print(f"{record.id} [{record.status}] {record.title}")
+                print(f"  source={record.source} updated_at={record.updated_at}")
+            return
+
     if args.command == "traces":
         settings = load_settings(args.config)
         trace_store = create_default_trace_store(settings)
@@ -209,6 +273,44 @@ def main() -> None:
                 _print_stored_trace(stored_trace)
             return
 
+    if args.command == "approvals":
+        settings = load_settings(args.config)
+        approval_store = create_default_approval_store(settings)
+        if args.approvals_command == "list":
+            status = None if args.status == "all" else args.status
+            for record in approval_store.list(status=status, limit=args.limit):
+                _print_approval_record(record)
+            return
+        if args.approvals_command == "show":
+            record = approval_store.get(args.approval_id)
+            if record is None:
+                parser.error(f"Unknown approval id: {args.approval_id}")
+                return
+            if args.json:
+                print(json.dumps(record, default=_json_default, indent=2))
+            else:
+                _print_approval_record(record, verbose=True)
+            return
+        if args.approvals_command == "approve":
+            try:
+                record = approval_store.decide(args.approval_id, "approved")
+            except (KeyError, ValueError) as exc:
+                parser.error(str(exc))
+                return
+            memory_store = MemoryStore(settings.memory.database_path)
+            effect = apply_approved_record(record, memory_store)
+            _print_approval_record(record)
+            print(f"  effect={effect}")
+            return
+        if args.approvals_command == "reject":
+            try:
+                record = approval_store.decide(args.approval_id, "rejected")
+            except (KeyError, ValueError) as exc:
+                parser.error(str(exc))
+                return
+            _print_approval_record(record)
+            return
+
     parser.error(f"Unknown command: {args.command}")
 
 
@@ -216,6 +318,23 @@ def _print_memory_record(record: MemoryRecord) -> None:
     """Print one memory record in a compact CLI format."""
     print(f"{record.id} [{record.type}] {record.content}")
     print(f"  source={record.source} updated_at={record.updated_at}")
+
+
+def _print_approval_record(
+    record: ApprovalRecord,
+    verbose: bool = False,
+) -> None:
+    """Print one approval record in a compact CLI format."""
+    run_id = record.run_id or "none"
+    print(f"{record.id} [{record.status}] {record.type}: {record.title}")
+    print(f"  reason={record.reason}")
+    print(f"  run_id={run_id} created_at={record.created_at}")
+    if record.decided_at:
+        print(f"  decided_at={record.decided_at}")
+    if verbose:
+        print("  payload:")
+        for key, value in record.payload.items():
+            print(f"    {key}={value}")
 
 
 def _print_trace_summary(summary: TraceSummary) -> None:

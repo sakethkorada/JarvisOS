@@ -109,6 +109,33 @@ python -m jarvis settings
 python -m jarvis settings --config jarvis.toml.example
 ```
 
+### Approvals
+
+JarvisOS queues approval items when a run suggests durable memory or when a tool
+requires explicit approval. Approval records are stored in SQLite.
+
+```powershell
+python -m jarvis run "Remember that I prefer meetings after 10 AM." --config jarvis.toml.example --model fake-local
+python -m jarvis approvals list --config jarvis.toml.example
+python -m jarvis approvals show <approval_id> --config jarvis.toml.example
+python -m jarvis approvals approve <approval_id> --config jarvis.toml.example
+python -m jarvis approvals reject <approval_id> --config jarvis.toml.example
+```
+
+Approving a `memory.add` item writes the memory to the configured memory store.
+Approving a tool execution item records the decision; automatic tool resume is a
+later workflow feature.
+
+### Tasks
+
+JarvisOS includes a low-risk local task write tool. `task.create` runs
+automatically because it only writes to the configured local SQLite task store.
+
+```powershell
+python -m jarvis run "Create a task to ask Jordan about API migration" --config jarvis.toml.example --model fake-local
+python -m jarvis tasks list --config jarvis.toml.example
+```
+
 ### Traces
 
 Every `jarvis run` stores a trace when `[traces].enabled = true`.
@@ -285,7 +312,13 @@ database_path = ".jarvis/memory.sqlite3"
 auto_extract = true
 auto_write = false
 
+[tasks]
+database_path = ".jarvis/tasks.sqlite3"
+
 [traces]
 database_path = ".jarvis/traces.sqlite3"
 enabled = true
+
+[approvals]
+database_path = ".jarvis/approvals.sqlite3"
 ```

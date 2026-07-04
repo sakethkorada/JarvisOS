@@ -14,6 +14,9 @@
 - Moved planner and synthesis prompts into bundled markdown files with optional
   config overrides.
 - Improved the meeting-prep demo path with deterministic Jordan calendar data.
+- Added a SQLite-backed approval queue with CLI list/show/approve/reject.
+- Added `task.create` and a local SQLite task store for auto-allowed local
+  writes.
 
 Current model behavior:
 
@@ -45,8 +48,8 @@ Why this should come before LLM-driven planning:
 
 ## Recommended Next Steps
 
-1. Add approval flow for suggested memory candidates before enabling any
-   automatic writes.
+1. Add resume/apply behavior for approved external or high-risk tool execution
+   items.
 2. Add trace filtering, timing, and basic metrics for benchmarking.
 3. Expand plugin support with enable/disable state and clearer validation errors.
 4. Add richer agent config files for specialists once prompt-only overrides feel

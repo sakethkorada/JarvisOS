@@ -34,7 +34,7 @@ def default_agent_registry() -> AgentRegistry:
         AgentSpec(
             name="orchestrator",
             description="Creates simple execution plans and summarizes results.",
-            allowed_tools=("task.breakdown", "task.create_summary"),
+            allowed_tools=("task.breakdown", "task.create", "task.create_summary"),
         )
     )
     registry.register(

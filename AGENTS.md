@@ -334,6 +334,15 @@ Approval prompts should show:
 The policy engine should make structured decisions. It should not rely on an LLM
 to decide whether an action is safe.
 
+Approval records should be durable and inspectable. The runtime should queue
+pending approvals in storage, and CLI or future UI surfaces should let the user
+list, inspect, approve, or reject them. Approved write actions should only be
+applied through deterministic handlers.
+
+Low-risk local writes may run automatically when they only affect local,
+inspectable JarvisOS state. Examples include creating a local task. External,
+sensitive, destructive, or user-visible actions should still require approval.
+
 ## 12. Memory
 
 Memory should be useful but simple at first.

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+from jarvis.approvals import ApprovalStore
 from jarvis.agents import AgentRegistry
 from jarvis.contracts import (
+    MemoryCandidate,
     PlanStep,
     RunResult,
     ToolResult,
@@ -31,6 +33,7 @@ class Orchestrator:
         policies: PolicyEngine,
         planner_prompt: str,
         synthesis_prompt: str,
+        approval_store: ApprovalStore | None = None,
         memory_extractor: MemoryExtractor | None = None,
         auto_write_memory: bool = False,
     ) -> None:
@@ -38,6 +41,7 @@ class Orchestrator:
         self._tools = tools
         self._models = models
         self._policies = policies
+        self._approval_store = approval_store
         self._memory_extractor = memory_extractor
         self._auto_write_memory = auto_write_memory
         self._planner = Planner(agents, tools, models, planner_prompt)
@@ -110,9 +114,27 @@ class Orchestrator:
             )
 
             if not decision.allowed:
+                approval_id = None
+                if self._approval_store is not None:
+                    approval = self._approval_store.create(
+                        approval_type="tool.execute",
+                        title=f"Approve tool execution: {tool.name}",
+                        reason=decision.reason,
+                        payload={
+                            "tool_name": tool.name,
+                            "arguments": step.tool_call.arguments,
+                            "risk_level": tool.risk_level,
+                            "requires_approval": tool.requires_approval,
+                        },
+                        run_id=run_id,
+                    )
+                    approval_id = approval.id
                 result = ToolResult(
                     tool_name=tool.name,
-                    output={"policy": decision.reason},
+                    output={
+                        "policy": decision.reason,
+                        "approval_id": approval_id,
+                    },
                     success=False,
                     error="Approval required.",
                 )
@@ -123,6 +145,7 @@ class Orchestrator:
                     TraceEvent(
                         "approval.required",
                         f"Approval required for {tool.name}.",
+                        data={"approval_id": approval_id, "tool": tool.name},
                     )
                 )
                 continue
@@ -175,12 +198,14 @@ class Orchestrator:
         final_response = synthesis.text
         memory_candidates = self._suggest_memory(goal, final_response)
         if memory_candidates:
+            approval_ids = self._queue_memory_approvals(run_id, memory_candidates)
             trace.append(
                 TraceEvent(
                     "memory.suggested",
-                    "Memory candidates were suggested but not saved.",
+                    "Memory candidates were queued for approval.",
                     data={
                         "auto_write_requested": self._auto_write_memory,
+                        "approval_ids": approval_ids,
                         "candidates": [
                             {
                                 "type": candidate.type,
@@ -197,10 +222,14 @@ class Orchestrator:
                 [
                     final_response,
                     "",
-                    "Suggested memory:",
+                    "Pending memory approvals:",
                     *[
-                        f"- {candidate.content} ({candidate.reason})"
-                        for candidate in memory_candidates
+                        f"- {candidate.content} ({candidate.reason}) "
+                        f"[approval: {approval_id}]"
+                        for candidate, approval_id in zip(
+                            memory_candidates,
+                            approval_ids,
+                        )
                     ],
                 ]
             )
@@ -221,3 +250,28 @@ class Orchestrator:
         if self._memory_extractor is None:
             return []
         return self._memory_extractor.suggest(goal, final_response)
+
+    def _queue_memory_approvals(
+        self,
+        run_id: str,
+        candidates: list[MemoryCandidate],
+    ) -> list[str | None]:
+        """Queue memory candidates for explicit user approval."""
+        approval_ids: list[str | None] = []
+        for candidate in candidates:
+            if self._approval_store is None:
+                approval_ids.append(None)
+                continue
+            approval = self._approval_store.create(
+                approval_type="memory.add",
+                title=f"Save memory: {candidate.type}",
+                reason=candidate.reason,
+                payload={
+                    "memory_type": candidate.type,
+                    "content": candidate.content,
+                    "source": candidate.source,
+                },
+                run_id=run_id,
+            )
+            approval_ids.append(approval.id)
+        return approval_ids

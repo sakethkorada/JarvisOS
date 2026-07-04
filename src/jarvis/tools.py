@@ -6,6 +6,7 @@ from typing import Any
 
 from jarvis.contracts import AvailableTool, ToolCall, ToolHandler, ToolResult, ToolSpec
 from jarvis.memory import MemoryStore
+from jarvis.tasks import TaskStore
 
 
 class ToolRegistry:
@@ -84,6 +85,28 @@ def _task_create_summary(arguments: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _task_create(arguments: dict[str, Any], task_store: TaskStore) -> dict[str, Any]:
+    title = str(arguments.get("title") or arguments.get("goal") or "").strip()
+    if not title:
+        raise ValueError("Task title is required.")
+    record = task_store.create(
+        title=title,
+        source=str(arguments.get("source", "tool")),
+        metadata={"input": arguments},
+    )
+    return {
+        "task": {
+            "id": record.id,
+            "title": record.title,
+            "status": record.status,
+            "source": record.source,
+            "created_at": record.created_at,
+            "updated_at": record.updated_at,
+            "metadata": record.metadata,
+        }
+    }
+
+
 def _memory_search(
     arguments: dict[str, Any],
     memory_store: MemoryStore,
@@ -131,7 +154,10 @@ def _calendar_search_events(arguments: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def default_tool_registry(memory_store: MemoryStore | None = None) -> ToolRegistry:
+def default_tool_registry(
+    memory_store: MemoryStore | None = None,
+    task_store: TaskStore | None = None,
+) -> ToolRegistry:
     """Create the built-in demo tools for the first runtime slice."""
     registry = ToolRegistry()
     registry.register(
@@ -148,6 +174,16 @@ def default_tool_registry(memory_store: MemoryStore | None = None) -> ToolRegist
         ),
         _task_create_summary,
     )
+    if task_store is not None:
+        registry.register(
+            ToolSpec(
+                name="task.create",
+                description="Create a low-risk local task.",
+                risk_level="low",
+                requires_approval=False,
+            ),
+            lambda arguments: _task_create(arguments, task_store),
+        )
     if memory_store is not None:
         registry.register(
             ToolSpec(

@@ -19,5 +19,7 @@ Rules:
 - Include memory.search when useful.
 - Include calendar.search_events for meeting, schedule, calendar, or time-bound requests.
 - Include notes.search when notes may contain relevant context for a named person, project, or meeting.
+- Include task.create when the user asks to create, add, remember as a task,
+  or track a todo item.
 - End with task.create_summary when available.
 - Do not invent tools, credentials, or completed actions.

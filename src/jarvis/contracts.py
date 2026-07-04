@@ -12,6 +12,8 @@ RiskLevel = Literal["low", "medium", "high"]
 PolicyStatus = Literal["allowed", "approval_required", "denied"]
 StepStatus = Literal["pending", "completed", "failed", "approval_required"]
 MemoryType = Literal["preference", "fact", "note", "context"]
+ApprovalStatus = Literal["pending", "approved", "rejected"]
+TaskStatus = Literal["open", "done"]
 
 
 def new_id(prefix: str) -> str:
@@ -171,3 +173,31 @@ class MemoryCandidate:
     content: str
     reason: str
     source: str = "run"
+
+
+@dataclass(frozen=True)
+class ApprovalRecord:
+    """Durable approval item waiting for a user decision."""
+
+    id: str
+    type: str
+    status: ApprovalStatus
+    title: str
+    reason: str
+    payload: dict[str, Any]
+    run_id: str | None
+    created_at: str
+    decided_at: str | None = None
+
+
+@dataclass(frozen=True)
+class TaskRecord:
+    """Durable local task created by a low-risk tool."""
+
+    id: str
+    title: str
+    status: TaskStatus
+    source: str
+    created_at: str
+    updated_at: str
+    metadata: dict[str, Any] = field(default_factory=dict)

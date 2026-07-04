@@ -158,3 +158,24 @@ config override paths under `[prompts]`.
 Reason: prompts are part of runtime behavior and should be editable without
 modifying Python code. Bundled defaults keep first-run setup simple, while
 override paths give users and developers a clean customization seam.
+
+## 0016 - Add a Durable Approval Queue Before Risky Writes
+
+JarvisOS now stores approval records in SQLite. Memory suggestions and
+policy-gated tool calls become pending approval items that can be listed,
+inspected, approved, or rejected from the CLI.
+
+Reason: approvals need to be deterministic and inspectable before the runtime
+can safely support email sends, calendar writes, MCP side effects, or automatic
+memory writes. The first slice applies approved `memory.add` items immediately;
+approved tool execution is recorded but not auto-resumed yet.
+
+## 0017 - Allow Low-Risk Local Writes Without Approval
+
+JarvisOS now includes `task.create`, a low-risk local write tool backed by a
+SQLite task store. It runs automatically because it only writes to local state
+and is visible through `jarvis tasks list`.
+
+Reason: not every write should require user approval. The approval queue should
+protect risky, external, or sensitive actions while simple local productivity
+actions remain pleasant to use.

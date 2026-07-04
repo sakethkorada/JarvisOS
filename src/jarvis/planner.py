@@ -100,6 +100,26 @@ class Planner:
                 )
             )
 
+        should_create_task = any(
+            phrase in normalized
+            for phrase in (
+                "create a task",
+                "add a task",
+                "todo",
+                "to-do",
+                "track a task",
+            )
+        )
+        if should_create_task and self._tools.has("task.create"):
+            steps.append(
+                PlanStep(
+                    id=new_id("step"),
+                    agent_name="orchestrator",
+                    tool_call=ToolCall("task.create", {"title": goal}),
+                    description="Create a local task.",
+                )
+            )
+
         if self._tools.has("task.create_summary"):
             steps.append(
                 PlanStep(
@@ -211,6 +231,8 @@ def _normalize_arguments(
     normalized = dict(arguments)
     if tool_name in {"memory.search", "calendar.search_events", "notes.search"}:
         normalized.setdefault("query", goal)
-    if tool_name in {"task.breakdown", "task.create_summary"}:
+    if tool_name in {"task.breakdown", "task.create", "task.create_summary"}:
         normalized.setdefault("goal", goal)
+    if tool_name == "task.create":
+        normalized.setdefault("title", goal)
     return normalized

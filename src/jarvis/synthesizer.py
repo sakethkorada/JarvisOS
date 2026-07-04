@@ -140,6 +140,13 @@ def grounded_result_lines(results: tuple[ToolResult, ...]) -> list[str]:
                         lines.append(line)
                     else:
                         lines.append(f"  - {item}")
+        elif result.tool_name == "task.create":
+            task = result.output.get("task")
+            if isinstance(task, dict):
+                title = task.get("title", "Untitled task")
+                task_id = task.get("id", "unknown")
+                lines.append("- Created task:")
+                lines.append(f"  - {title} [{task_id}]")
     return lines
 
 

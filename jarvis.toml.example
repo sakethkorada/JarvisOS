@@ -27,6 +27,12 @@ database_path = ".jarvis/memory.sqlite3"
 auto_extract = true
 auto_write = false
 
+[tasks]
+database_path = ".jarvis/tasks.sqlite3"
+
 [traces]
 database_path = ".jarvis/traces.sqlite3"
 enabled = true
+
+[approvals]
+database_path = ".jarvis/approvals.sqlite3"
