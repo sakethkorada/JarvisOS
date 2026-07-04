@@ -23,7 +23,7 @@
 - Added `general.generate_text` as a model-backed internal language capability.
 - Added minimal `$last.text` step data flow for generated text -> tool calls.
 - Split runtime code into orchestration, tools, models, integrations, and
-  storage packages while keeping compatibility imports.
+  storage packages, then removed top-level compatibility wrappers.
 - Added per-tool MCP risk and approval overrides.
 
 Current model behavior:

@@ -87,20 +87,14 @@ path.
 
 ## 0009 - Keep Package Flat Until Responsibility Pressure Appears
 
-The current package keeps one file per early subsystem under `src/jarvis/`, such
-as `models.py`, `tools.py`, `plugins.py`, `settings.py`, and `orchestrator.py`.
+Early JarvisOS kept one file per subsystem under `src/jarvis/`, such as
+`models.py`, `tools.py`, `plugins.py`, `settings.py`, and `orchestrator.py`.
 
 Reason: the first slices are still small enough that a flat layout is easier to
 read and change. Refactor into subpackages when files start mixing multiple
 responsibilities or become hard to scan.
 
-Likely future split points:
-
-- `models.py` into `models/base.py`, `models/router.py`, `models/ollama.py`.
-- `tools.py` into `tools/registry.py`, `tools/builtins.py`, `tools/executor.py`.
-- `plugins.py` into `plugins/manifest.py`, `plugins/loader.py`, and later
-  `plugins/acquisition.py`.
-- `cli.py` into a `cli/` package once commands grow.
+This decision has been superseded by decision 0024.
 
 ## 0010 - Build Memory Store Before Automatic Memory Writes
 
@@ -251,8 +245,9 @@ create pressure for it.
 ## 0024 - Split Runtime Packages After the Generalist Slice
 
 JarvisOS now groups code by subsystem: orchestration, tools, models,
-integrations, and storage. Old top-level imports remain available through
-compatibility exports.
+integrations, and storage. Top-level compatibility wrappers for moved modules
+were removed after tests and internal imports switched to canonical package
+paths.
 
 Reason: the generalist slice clarified the highest-pressure boundaries. The
 package split keeps Calendar, Spotify, cloud providers, and richer sub-agent

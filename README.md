@@ -21,6 +21,7 @@ reference workflows while keeping the core runtime generic and configurable.
 - Prefer deterministic validation, routing, policy, tracing, and storage.
 
 See [AGENTS.md](AGENTS.md) for the living project context.
+See [docs/architecture.md](docs/architecture.md) for the current package map.
 
 ## CLI Quickstart
 
@@ -161,11 +162,12 @@ python -m jarvis traces list --config jarvis.toml.example
 Use `--model fake-local` for deterministic smoke checks. Use Ollama for the
 LLM planner and synthesis path.
 
-To prove model-generated text flowing into a tool, configure the demo MCP server
-from the MCP section below and run:
+To prove model-generated text flowing into a tool, copy
+`examples/mcp/demo.toml.example` to a local config such as `mcp-demo.toml`,
+then run:
 
 ```powershell
-python -m jarvis run "Generate a fun fact about JarvisOS and echo it with the demo MCP tool" --config path\to\mcp-demo.toml --model "ollama/llama3.2:3b"
+python -m jarvis run "Generate a fun fact about JarvisOS and echo it with the demo MCP tool" --config mcp-demo.toml --model "ollama/llama3.2:3b"
 ```
 
 ### Traces
@@ -363,9 +365,9 @@ Try the demo server:
 
 ```powershell
 $env:PYTHONPATH="src"
-python -m jarvis tools --config path\to\mcp-demo.toml
-python -m jarvis run "call demo mcp echo" --config path\to\mcp-demo.toml --model fake-local
-python -m jarvis run "Generate a fun fact about JarvisOS and echo it with the demo MCP tool" --config path\to\mcp-demo.toml --model "ollama/llama3.2:3b"
+python -m jarvis tools --config mcp-demo.toml
+python -m jarvis run "call demo mcp echo" --config mcp-demo.toml --model fake-local
+python -m jarvis run "Generate a fun fact about JarvisOS and echo it with the demo MCP tool" --config mcp-demo.toml --model "ollama/llama3.2:3b"
 ```
 
 The echo server only echoes input. If the run produces a new fun fact or draft,

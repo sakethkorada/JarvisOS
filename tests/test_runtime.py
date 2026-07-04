@@ -3,22 +3,23 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import sys
 
-from jarvis.approvals import ApprovalStore, apply_approved_record
 from jarvis.contracts import ToolCall, ToolExecutionContext
 from jarvis.contracts import ModelRequest, ModelResponse
 from jarvis.errors import ModelProviderError
-from jarvis.memory import MemoryExtractor, MemoryStore
-from jarvis.mcp import McpStdioClient
 from jarvis.models import ModelProvider, ModelRouter
-from jarvis.planner import Planner
+from jarvis.orchestration.orchestrator import Orchestrator
+from jarvis.orchestration.planner import Planner
 from jarvis.agents import default_agent_registry
 from jarvis.prompts import PromptLibrary
 from jarvis.runtime import create_default_orchestrator
 from jarvis.runtime import create_default_tool_registry
 from jarvis.settings import McpServerSettings, load_settings
-from jarvis.tasks import TaskStore
+from jarvis.storage.approvals import ApprovalStore, apply_approved_record
+from jarvis.storage.memory import MemoryExtractor, MemoryStore
+from jarvis.integrations.mcp import McpStdioClient
+from jarvis.storage.tasks import TaskStore
 from jarvis.tools import default_tool_registry
-from jarvis.traces import TraceStore
+from jarvis.storage.traces import TraceStore
 
 
 class RuntimeTests(unittest.TestCase):
@@ -994,7 +995,6 @@ args = ["{server_path}"]
             )
             settings = load_settings(config_path)
             tools = create_default_tool_registry(settings)
-            from jarvis.orchestrator import Orchestrator
             from jarvis.policies import PolicyEngine
 
             orchestrator = Orchestrator(
@@ -1054,7 +1054,6 @@ args = ["{server_path}"]
             )
             settings = load_settings(config_path)
             tools = create_default_tool_registry(settings)
-            from jarvis.orchestrator import Orchestrator
             from jarvis.policies import PolicyEngine
 
             orchestrator = Orchestrator(
@@ -1264,7 +1263,6 @@ def _orchestrator_with_provider(
     provider: ModelProvider,
     memory_store: MemoryStore,
 ):
-    from jarvis.orchestrator import Orchestrator
     from jarvis.policies import PolicyEngine
 
     return Orchestrator(

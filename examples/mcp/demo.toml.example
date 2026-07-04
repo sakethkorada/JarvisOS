@@ -1,0 +1,10 @@
+# Demo MCP config for JarvisOS.
+# Copy this to a local TOML file such as mcp-demo.toml and run with:
+# python -m jarvis tools --config mcp-demo.toml
+
+[[mcp.servers]]
+name = "demo_mcp"
+command = "python"
+args = ["examples/mcp/demo_server.py"]
+risk_level = "low"
+requires_approval = false

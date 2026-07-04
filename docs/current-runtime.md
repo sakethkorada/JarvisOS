@@ -3,6 +3,8 @@
 This document describes what the runtime does right now. It should be updated
 whenever a slice changes the shape of execution.
 
+See `docs/architecture.md` for the current package ownership map.
+
 ## Current Flow
 
 ```text
@@ -110,7 +112,7 @@ python -m jarvis tasks complete <task_id> --config jarvis.toml.example
 python -m jarvis run "prepare me for my meeting tomorrow" --model "ollama/llama3.2:3b"
 python -m jarvis run "prepare me for my meeting tomorrow" --mode private
 python -m jarvis run "prepare me for my meeting tomorrow" --model "ollama/llama3.2:3b" --json
-python -m jarvis run "Generate a fun fact about JarvisOS and echo it with the demo MCP tool" --config <mcp-demo-config> --model "ollama/llama3.2:3b"
+python -m jarvis run "Generate a fun fact about JarvisOS and echo it with the demo MCP tool" --config mcp-demo.toml --model "ollama/llama3.2:3b"
 python -m unittest discover -s tests
 ```
 
