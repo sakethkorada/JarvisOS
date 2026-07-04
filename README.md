@@ -309,6 +309,35 @@ risk_level = "low"
 requires_approval = false
 ```
 
+## MCP Tools
+
+JarvisOS can load tools from local MCP stdio servers. MCP tools are normalized
+into the same internal tool registry as built-ins and plugins, so the planner,
+policy engine, trace store, and synthesis layer treat them the same way.
+
+Example config:
+
+```toml
+[[mcp.servers]]
+name = "demo_mcp"
+command = "python"
+args = ["examples/mcp/demo_server.py"]
+risk_level = "low"
+requires_approval = false
+```
+
+Read-only MCP servers should usually be low risk and auto-allowed. Write,
+send, post, playback, purchase, booking, or externally visible MCP tools should
+be configured to require approval.
+
+Try the demo server:
+
+```powershell
+$env:PYTHONPATH="src"
+python -m jarvis tools --config path\to\mcp-demo.toml
+python -m jarvis run "call demo mcp echo" --config path\to\mcp-demo.toml --model fake-local
+```
+
 ## Local Memory
 
 JarvisOS has a small SQLite-backed memory store. Manual memory commands are real;

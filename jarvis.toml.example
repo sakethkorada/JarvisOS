@@ -16,6 +16,13 @@ models = ["llama3.2:3b"]
 # a future installer. Runtime loading treats both the same after they are local.
 paths = ["examples/plugins/demo_notes"]
 
+[mcp]
+# MCP servers expose external tools. Read-only servers should usually stay low
+# risk and auto-allowed. Write/action servers should require approval.
+servers = [
+  # { name = "demo_mcp", command = "python", args = ["examples/mcp/demo_server.py"] }
+]
+
 [prompts]
 # Omit these to use bundled defaults from src/jarvis/prompts/.
 # Paths are resolved relative to this config file when they are not absolute.

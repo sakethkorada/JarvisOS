@@ -43,6 +43,25 @@ class PluginSettings:
 
 
 @dataclass(frozen=True)
+class McpServerSettings:
+    """Configuration for one MCP stdio server."""
+
+    name: str
+    command: str
+    args: tuple[str, ...] = ()
+    enabled: bool = True
+    risk_level: str = "low"
+    requires_approval: bool = False
+
+
+@dataclass(frozen=True)
+class McpSettings:
+    """Configured MCP servers that can expose tools."""
+
+    servers: tuple[McpServerSettings, ...] = ()
+
+
+@dataclass(frozen=True)
 class MemorySettings:
     """Memory persistence and extraction settings."""
 
@@ -88,6 +107,7 @@ class JarvisSettings:
     models: ModelSettings = field(default_factory=ModelSettings)
     providers: ProviderSettings = field(default_factory=ProviderSettings)
     plugins: PluginSettings = field(default_factory=PluginSettings)
+    mcp: McpSettings = field(default_factory=McpSettings)
     memory: MemorySettings = field(default_factory=MemorySettings)
     tasks: TaskSettings = field(default_factory=TaskSettings)
     traces: TraceSettings = field(default_factory=TraceSettings)
@@ -136,6 +156,7 @@ def _settings_from_data(
     provider_data = _table(data, "providers")
     ollama_data = _table(provider_data, "ollama")
     plugin_data = _table(data, "plugins")
+    mcp_data = _table(data, "mcp")
     memory_data = _table(data, "memory")
     task_data = _table(data, "tasks")
     trace_data = _table(data, "traces")
@@ -150,6 +171,7 @@ def _settings_from_data(
         _resolve_config_path(path, loaded_from)
         for path in _string_list(plugin_data.get("paths"))
     )
+    mcp_servers = tuple(_mcp_servers_from_data(mcp_data))
     memory_database_path = _resolve_config_path(
         _optional_string(memory_data.get("database_path")) or ".jarvis/memory.sqlite3",
         loaded_from,
@@ -180,6 +202,7 @@ def _settings_from_data(
             ollama_models=ollama_models,
         ),
         plugins=PluginSettings(paths=plugin_paths),
+        mcp=McpSettings(servers=mcp_servers),
         memory=MemorySettings(
             database_path=memory_database_path,
             auto_extract=auto_extract,
@@ -220,6 +243,7 @@ def _settings_with_environment(settings: JarvisSettings) -> JarvisSettings:
             ollama_models=tuple(ollama_models),
         ),
         plugins=settings.plugins,
+        mcp=settings.mcp,
         memory=settings.memory,
         tasks=settings.tasks,
         traces=settings.traces,
@@ -242,6 +266,38 @@ def _optional_path(value: Any, loaded_from: Path | None) -> Path | None:
     if path is None:
         return None
     return _resolve_config_path(path, loaded_from)
+
+
+def _mcp_servers_from_data(data: dict[str, Any]) -> list[McpServerSettings]:
+    servers: list[McpServerSettings] = []
+    raw_servers = data.get("servers", [])
+    if not isinstance(raw_servers, list):
+        raise ValueError("Expected [mcp].servers to be a list of tables.")
+    for item in raw_servers:
+        if not isinstance(item, dict):
+            raise ValueError("Expected each MCP server to be a table.")
+        name = _optional_string(item.get("name"))
+        command = _optional_string(item.get("command"))
+        if name is None or command is None:
+            raise ValueError("MCP servers require name and command.")
+        args = tuple(_string_list(item.get("args")))
+        enabled = _optional_bool(item.get("enabled"), default=True)
+        risk_level = _optional_string(item.get("risk_level")) or "low"
+        requires_approval = _optional_bool(
+            item.get("requires_approval"),
+            default=False,
+        )
+        servers.append(
+            McpServerSettings(
+                name=name,
+                command=command,
+                args=args,
+                enabled=enabled,
+                risk_level=risk_level,
+                requires_approval=requires_approval,
+            )
+        )
+    return servers
 
 
 def _table(data: dict[str, Any], key: str) -> dict[str, Any]:

@@ -32,6 +32,7 @@ CLI command
   planning if invalid.
 - Planner and synthesis prompts load from bundled markdown files, with optional
   config overrides.
+- Configured MCP stdio servers can expose tools into the shared ToolRegistry.
 - The synthesis agent can use the selected model to write the final answer from
   confirmed tool results.
 - Synthesis falls back to deterministic grounded output if the model fails,
@@ -44,6 +45,7 @@ CLI command
 - `--model` can select a provider such as `ollama/llama3.2:3b`.
 - `jarvis.toml` can set a default model and mode-specific model choices.
 - Local plugin folders can be loaded from configured plugin paths.
+- MCP server tools can be loaded from `[[mcp.servers]]` config entries.
 - `memory.search` uses a local SQLite-backed memory store.
 - `jarvis memory add/search/list` manage local memory records.
 - `task.create` writes low-risk local tasks to SQLite without approval.
@@ -65,6 +67,8 @@ CLI command
 - Calendar search is still a deterministic demo tool. It returns a sample
   Jordan meeting for meeting-prep smoke tests and placeholder output otherwise.
 - Tasks are local SQLite records, not synced to an external task app yet.
+- MCP support currently covers stdio tool discovery/calls. HTTP transports,
+  resources, prompts, and long-lived sessions can come later.
 - Deterministic synthesis is still simple, but it includes grounded lines from
   actual tool outputs and acts as the fallback path.
 - Tool execution approvals can be recorded, but approved tool calls are not

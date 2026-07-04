@@ -1,19 +1,21 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+import sys
 
 from jarvis.approvals import ApprovalStore, apply_approved_record
 from jarvis.contracts import ToolCall
 from jarvis.contracts import ModelRequest, ModelResponse
 from jarvis.errors import ModelProviderError
 from jarvis.memory import MemoryExtractor, MemoryStore
+from jarvis.mcp import McpStdioClient
 from jarvis.models import ModelProvider, ModelRouter
 from jarvis.planner import Planner
 from jarvis.agents import default_agent_registry
 from jarvis.prompts import PromptLibrary
 from jarvis.runtime import create_default_orchestrator
 from jarvis.runtime import create_default_tool_registry
-from jarvis.settings import load_settings
+from jarvis.settings import McpServerSettings, load_settings
 from jarvis.tasks import TaskStore
 from jarvis.tools import default_tool_registry
 from jarvis.traces import TraceStore
@@ -355,6 +357,28 @@ database_path = "state/tasks.sqlite3"
             settings.tasks.database_path,
             Path(temp_dir) / "state" / "tasks.sqlite3",
         )
+
+    def test_loads_mcp_server_settings_from_toml(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "jarvis.toml"
+            config_path.write_text(
+                """
+[[mcp.servers]]
+name = "demo_mcp"
+command = "python"
+args = ["demo_server.py"]
+risk_level = "low"
+requires_approval = false
+""".strip(),
+                encoding="utf-8",
+            )
+
+            settings = load_settings(config_path)
+
+        self.assertEqual(len(settings.mcp.servers), 1)
+        self.assertEqual(settings.mcp.servers[0].name, "demo_mcp")
+        self.assertEqual(settings.mcp.servers[0].args, ("demo_server.py",))
 
     def test_loads_prompt_override_paths_from_toml(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -765,6 +789,122 @@ paths = ["{plugin_path.name}"]
         self.assertEqual(result.output["matches"][0]["title"], "Jordan meeting")
 
 
+class McpTests(unittest.TestCase):
+    """Tests for MCP stdio tool loading and execution."""
+
+    def test_mcp_client_lists_and_calls_demo_tool(self) -> None:
+        server = _demo_mcp_server_settings()
+        client = McpStdioClient(server)
+
+        tools = client.list_tools()
+        result = client.call_tool("echo", {"text": "hello"})
+
+        self.assertEqual(tools[0]["name"], "echo")
+        self.assertEqual(result["content"][0]["text"], "demo echo: hello")
+
+    def test_mcp_tool_is_registered_from_settings(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "jarvis.toml"
+            command = sys.executable.replace("\\", "/")
+            server_path = str(_demo_mcp_server_path()).replace("\\", "/")
+            config_path.write_text(
+                f"""
+[[mcp.servers]]
+name = "demo_mcp"
+command = "{command}"
+args = ["{server_path}"]
+""".strip(),
+                encoding="utf-8",
+            )
+            settings = load_settings(config_path)
+
+            registry = create_default_tool_registry(settings)
+            result = registry.execute(
+                ToolCall("demo_mcp.echo", {"text": "from registry"})
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.output["text"], "demo echo: from registry")
+
+    def test_orchestrator_can_execute_validated_mcp_tool_plan(self) -> None:
+        provider = StaticModelProvider(
+            """
+{
+  "steps": [
+    {
+      "tool_name": "demo_mcp.echo",
+      "arguments": {"text": "orchestrated"},
+      "description": "Call demo MCP echo."
+    }
+  ]
+}
+""".strip()
+        )
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "jarvis.toml"
+            command = sys.executable.replace("\\", "/")
+            server_path = str(_demo_mcp_server_path()).replace("\\", "/")
+            config_path.write_text(
+                f"""
+[[mcp.servers]]
+name = "demo_mcp"
+command = "{command}"
+args = ["{server_path}"]
+""".strip(),
+                encoding="utf-8",
+            )
+            settings = load_settings(config_path)
+            tools = create_default_tool_registry(settings)
+            from jarvis.orchestrator import Orchestrator
+            from jarvis.policies import PolicyEngine
+
+            orchestrator = Orchestrator(
+                agents=default_agent_registry(),
+                tools=tools,
+                models=ModelRouter({provider.name: provider}, provider.name),
+                policies=PolicyEngine(),
+                planner_prompt=PromptLibrary().planner_prompt(),
+                synthesis_prompt=PromptLibrary().synthesis_prompt(),
+            )
+
+            result = orchestrator.run("call demo mcp", provider.name)
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.step_results[0].tool_name, "demo_mcp.echo")
+        self.assertEqual(
+            result.step_results[0].output["text"],
+            "demo echo: orchestrated",
+        )
+
+    def test_fake_local_fallback_can_execute_mcp_echo_tool(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "jarvis.toml"
+            command = sys.executable.replace("\\", "/")
+            server_path = str(_demo_mcp_server_path()).replace("\\", "/")
+            config_path.write_text(
+                f"""
+[[mcp.servers]]
+name = "demo_mcp"
+command = "{command}"
+args = ["{server_path}"]
+""".strip(),
+                encoding="utf-8",
+            )
+            settings = load_settings(config_path)
+
+            result = create_default_orchestrator(settings).run(
+                "echo hello from mcp",
+                model_name="fake-local",
+            )
+
+        tool_names = [item.tool_name for item in result.step_results]
+        self.assertIn("demo_mcp.echo", tool_names)
+        self.assertIn("demo echo: echo hello from mcp", result.final_response)
+
+
 def _write_notes_plugin(root: Path) -> Path:
     plugin_path = root / "demo_notes"
     plugin_path.mkdir()
@@ -800,6 +940,18 @@ def search_notes(arguments):
         encoding="utf-8",
     )
     return plugin_path
+
+
+def _demo_mcp_server_settings() -> McpServerSettings:
+    return McpServerSettings(
+        name="demo_mcp",
+        command=sys.executable,
+        args=(str(_demo_mcp_server_path()),),
+    )
+
+
+def _demo_mcp_server_path() -> Path:
+    return Path(__file__).resolve().parents[1] / "examples" / "mcp" / "demo_server.py"
 
 
 class StaticModelProvider(ModelProvider):

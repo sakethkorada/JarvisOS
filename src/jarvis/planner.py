@@ -120,6 +120,18 @@ class Planner:
                 )
             )
 
+        if "echo" in normalized:
+            echo_tool = _first_matching_tool(self._tools, suffix=".echo")
+            if echo_tool is not None:
+                steps.append(
+                    PlanStep(
+                        id=new_id("step"),
+                        agent_name="plugin",
+                        tool_call=ToolCall(echo_tool, {"text": goal}),
+                        description="Call configured echo tool.",
+                    )
+                )
+
         if self._tools.has("task.create_summary"):
             steps.append(
                 PlanStep(
@@ -235,4 +247,13 @@ def _normalize_arguments(
         normalized.setdefault("goal", goal)
     if tool_name == "task.create":
         normalized.setdefault("title", goal)
+    if tool_name.endswith(".echo"):
+        normalized.setdefault("text", goal)
     return normalized
+
+
+def _first_matching_tool(tools: ToolRegistry, suffix: str) -> str | None:
+    for tool in tools.list():
+        if tool.name.endswith(suffix):
+            return tool.name
+    return None

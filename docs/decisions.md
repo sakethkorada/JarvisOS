@@ -199,3 +199,14 @@ new record.
 Reason: duplicate memory is already visible in local testing. A simple
 deterministic duplicate check reduces clutter now. More nuanced merge/update
 behavior can come later through a memory review layer.
+
+## 0020 - Load MCP Tools Into the Shared Tool Registry
+
+JarvisOS now supports configured MCP stdio servers and registers their exposed
+tools as normal `ToolSpec` entries.
+
+Reason: Gmail, Calendar, Spotify, and future integrations should use existing
+MCP servers when good ones are available. JarvisOS should provide the client and
+policy/trace/orchestration layer instead of rebuilding every provider adapter
+by hand. Read-only MCP tools can be low-risk by default, while writes remain
+approval-controlled through configuration and policy.

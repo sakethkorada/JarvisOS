@@ -275,6 +275,11 @@ Tool sources may include:
 - browser automation,
 - n8n or webhook workflows.
 
+Prefer existing MCP servers for provider integrations when they are reliable and
+fit the needed auth/scopes. JarvisOS should act as the orchestration, policy,
+trace, and approval layer around MCP tools rather than rebuilding every provider
+API wrapper by hand.
+
 The plugin model should be user-managed in early versions. JarvisOS can load
 plugins from configured local paths, but the user is responsible for downloading,
 installing, or trusting plugin code. This is similar in spirit to how developer
