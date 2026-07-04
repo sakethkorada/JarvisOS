@@ -1,4 +1,5 @@
 import unittest
+import importlib.util
 from contextlib import contextmanager, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -24,13 +25,14 @@ from jarvis.runtime import create_default_tool_registry
 from jarvis.settings import McpServerSettings, load_settings
 from jarvis.storage.approvals import ApprovalStore, apply_approved_record
 from jarvis.storage.memory import MemoryExtractor, MemoryStore
-from jarvis.integrations.mcp import McpHttpClient, McpStdioClient
+from jarvis.integrations.mcp import McpHttpClient, McpStdioClient, _resolved_command
 from jarvis.integrations.oauth import OAuthManager
 from jarvis.settings import OAuthProviderSettings
 from jarvis.storage.auth import AuthStore
 from jarvis.storage.tasks import TaskStore
 from jarvis.tools import default_tool_registry
 from jarvis.storage.traces import TraceStore
+from jarvis.cli import _auth_debug
 
 
 class RuntimeTests(unittest.TestCase):
@@ -408,6 +410,7 @@ client_id = "client-id"
 client_secret_env = "GOOGLE_CLIENT_SECRET"
 authorization_url = "https://accounts.google.com/o/oauth2/v2/auth"
 token_url = "https://oauth2.googleapis.com/token"
+tokeninfo_url = "https://oauth2.googleapis.com/tokeninfo"
 redirect_uri = "http://localhost:8765/oauth/callback"
 scopes = ["https://www.googleapis.com/auth/calendar.events.readonly"]
 
@@ -434,6 +437,10 @@ X-Test = "1"
         self.assertEqual(
             settings.auth.oauth_providers[0].scopes,
             ("https://www.googleapis.com/auth/calendar.events.readonly",),
+        )
+        self.assertEqual(
+            settings.auth.oauth_providers[0].tokeninfo_url,
+            "https://oauth2.googleapis.com/tokeninfo",
         )
         server = settings.mcp.servers[0]
         self.assertEqual(server.transport, "http")
@@ -812,11 +819,113 @@ class PlannerTests(unittest.TestCase):
         self.assertIn("external_calendar.list_calendars", tool_names)
         self.assertNotIn("calendar.search_events", tool_names)
 
+    def test_llm_plan_strips_unknown_mcp_arguments_from_schema(self) -> None:
+        provider = StaticModelProvider(
+            """
+{
+  "steps": [
+    {
+      "tool_name": "external_calendar.list_calendars",
+      "arguments": {"query": "my calendars"},
+      "description": "List calendars."
+    }
+  ]
+}
+""".strip()
+        )
+        with TemporaryDirectory() as temp_dir:
+            tools = default_tool_registry(MemoryStore(Path(temp_dir) / "memory.sqlite3"))
+            tools.register(
+                ToolSpec(
+                    name="external_calendar.list_calendars",
+                    description="List external calendars.",
+                    source="mcp:external_calendar",
+                    input_schema={
+                        "type": "object",
+                        "properties": {},
+                    },
+                ),
+                lambda arguments: {"text": "external calendars"},
+            )
+            planner = Planner(
+                default_agent_registry(),
+                tools,
+                ModelRouter(
+                    {provider.name: provider},
+                    default_provider_name=provider.name,
+                ),
+                PromptLibrary().planner_prompt(),
+            )
+
+            plan, source, _ = planner.create_plan(
+                "Use Google Calendar to list my calendars",
+                model_name=provider.name,
+                model_mode="balanced",
+            )
+
+        self.assertEqual(source, "llm")
+        self.assertEqual(
+            plan.steps[0].tool_call.arguments,
+            {},
+        )
+
+    def test_llm_plan_rejects_missing_required_schema_argument(self) -> None:
+        provider = StaticModelProvider(
+            """
+{
+  "steps": [
+    {
+      "tool_name": "external_calendar.get_event",
+      "arguments": {},
+      "description": "Get an event."
+    }
+  ]
+}
+""".strip()
+        )
+        with TemporaryDirectory() as temp_dir:
+            tools = default_tool_registry(MemoryStore(Path(temp_dir) / "memory.sqlite3"))
+            tools.register(
+                ToolSpec(
+                    name="external_calendar.get_event",
+                    description="Get external calendar event.",
+                    source="mcp:external_calendar",
+                    input_schema={
+                        "type": "object",
+                        "properties": {"eventId": {"type": "string"}},
+                        "required": ["eventId"],
+                    },
+                ),
+                lambda arguments: {"text": "event"},
+            )
+            planner = Planner(
+                default_agent_registry(),
+                tools,
+                ModelRouter(
+                    {provider.name: provider},
+                    default_provider_name=provider.name,
+                ),
+                PromptLibrary().planner_prompt(),
+            )
+
+            plan, source, _ = planner.create_plan(
+                "Use Google Calendar to get an event",
+                model_name=provider.name,
+                model_mode="balanced",
+            )
+
+        self.assertEqual(source, "fallback")
+        self.assertNotEqual(
+            plan.steps[0].tool_call.tool_name,
+            "external_calendar.get_event",
+        )
+
     def test_bundled_prompt_prefers_external_calendar_tools(self) -> None:
         prompt = PromptLibrary().planner_prompt()
 
         self.assertIn("prefer external read-only calendar tools", prompt)
         self.assertIn("calendar.search_events only when no external", prompt)
+        self.assertIn("Follow each tool's input_schema exactly", prompt)
 
 
 class GeneralToolTests(unittest.TestCase):
@@ -1008,6 +1117,113 @@ class AuthStoreTests(unittest.TestCase):
         self.assertEqual(loaded.refresh_token, "refresh")
         self.assertTrue(cleared)
 
+    def test_auth_debug_reports_scope_diff_without_token_value(self) -> None:
+        with _tokeninfo_server() as tokeninfo_url:
+            with TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                config_path = root / "jarvis.toml"
+                config_path.write_text(
+                    f"""
+[auth]
+database_path = "auth.sqlite3"
+
+[[auth.oauth_providers]]
+name = "demo_oauth"
+client_id = "client-id"
+tokeninfo_url = "{tokeninfo_url}"
+scopes = ["calendar.read", "calendar.write"]
+""".strip(),
+                    encoding="utf-8",
+                )
+                settings = load_settings(config_path)
+                auth_store = AuthStore(settings.auth.database_path)
+                auth_store.set_token(
+                    "demo_oauth",
+                    _TokenInfoHandler.expected_token,
+                    refresh_token="refresh-token",
+                )
+
+                debug = _auth_debug(settings, auth_store, "demo_oauth")
+
+        encoded = json.dumps(debug, default=str)
+        self.assertNotIn(_TokenInfoHandler.expected_token, encoded)
+        self.assertTrue(debug["token_stored"])
+        self.assertTrue(debug["refresh_token_stored"])
+        self.assertEqual(debug["granted_scopes"], ["calendar.read"])
+        self.assertEqual(debug["missing_configured_scopes"], ["calendar.write"])
+        self.assertTrue(debug["client_id_matches_audience"])
+
+    def test_auth_debug_handles_missing_provider(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "jarvis.toml"
+            config_path.write_text("", encoding="utf-8")
+            settings = load_settings(config_path)
+            auth_store = AuthStore(settings.auth.database_path)
+
+            debug = _auth_debug(settings, auth_store, "missing")
+
+        self.assertFalse(debug["provider_configured"])
+        self.assertFalse(debug["token_stored"])
+
+
+class GoogleCalendarFastMcpWrapperTests(unittest.TestCase):
+    """Tests for the local FastMCP Google Calendar REST wrapper."""
+
+    def test_list_calendars_uses_stored_token_and_formats_results(self) -> None:
+        module = _google_calendar_fastmcp_module()
+        with _calendar_api_server() as api_base_url:
+            with TemporaryDirectory() as temp_dir:
+                auth_db = Path(temp_dir) / "auth.sqlite3"
+                AuthStore(auth_db).set_token(
+                    "google",
+                    _CalendarApiHandler.expected_token,
+                )
+
+                text = module.list_calendars_text(
+                    auth_db=auth_db,
+                    config_path=None,
+                    provider="google",
+                    api_base_url=api_base_url,
+                )
+
+        self.assertEqual(_CalendarApiHandler.last_authorization, "Bearer test-token")
+        self.assertIn("Calendars:", text)
+        self.assertIn("Primary Calendar", text)
+        self.assertIn("primary", text)
+
+    def test_list_events_uses_time_bounds_and_formats_results(self) -> None:
+        module = _google_calendar_fastmcp_module()
+        with _calendar_api_server() as api_base_url:
+            with TemporaryDirectory() as temp_dir:
+                auth_db = Path(temp_dir) / "auth.sqlite3"
+                AuthStore(auth_db).set_token(
+                    "google",
+                    _CalendarApiHandler.expected_token,
+                )
+
+                text = module.list_events_text(
+                    auth_db=auth_db,
+                    config_path=None,
+                    provider="google",
+                    api_base_url=api_base_url,
+                    calendar_id="primary",
+                    start_time="2026-07-04T00:00:00Z",
+                    end_time="2026-07-05T00:00:00Z",
+                    max_results=5,
+                )
+
+        self.assertIn("Events for primary:", text)
+        self.assertIn("Planning Sync", text)
+        self.assertIn("evt-1", text)
+        self.assertEqual(
+            _CalendarApiHandler.last_query.get("timeMin"),
+            ["2026-07-04T00:00:00Z"],
+        )
+        self.assertEqual(
+            _CalendarApiHandler.last_query.get("timeMax"),
+            ["2026-07-05T00:00:00Z"],
+        )
+
 
 class McpTests(unittest.TestCase):
     """Tests for MCP stdio tool loading and execution."""
@@ -1021,6 +1237,30 @@ class McpTests(unittest.TestCase):
 
         self.assertEqual(tools[0]["name"], "echo")
         self.assertEqual(result["content"][0]["text"], "demo echo: hello")
+
+    def test_mcp_client_reports_subprocess_stderr(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            server_path = Path(temp_dir) / "broken_server.py"
+            server_path.write_text(
+                "import sys\nsys.stderr.write('missing dependency')\nsys.exit(1)\n",
+                encoding="utf-8",
+            )
+            server = McpServerSettings(
+                name="broken",
+                command=sys.executable,
+                args=(str(server_path),),
+            )
+            client = McpStdioClient(server)
+
+            with self.assertRaises(RuntimeError) as context:
+                client.list_tools()
+
+        self.assertIn("missing dependency", str(context.exception))
+
+    def test_stdio_python_command_resolves_to_current_interpreter(self) -> None:
+        self.assertEqual(_resolved_command("python"), sys.executable)
+        self.assertEqual(_resolved_command("python.exe"), sys.executable)
+        self.assertEqual(_resolved_command("custom-python"), "custom-python")
 
     def test_http_mcp_client_lists_and_calls_demo_tool(self) -> None:
         with _http_mcp_server() as server_url:
@@ -1223,8 +1463,33 @@ url = "{server_url}"
         self.assertTrue(result.success)
         self.assertEqual(
             _HttpMcpHandler.last_arguments,
-            {"text": "clean", "nested": {"keep": "value"}},
+            {"text": "clean"},
         )
+
+    def test_http_mcp_tool_drops_unknown_schema_arguments(self) -> None:
+        _HttpMcpHandler.last_arguments = None
+        with _http_mcp_server() as server_url:
+            with TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                config_path = root / "jarvis.toml"
+                config_path.write_text(
+                    f"""
+[[mcp.servers]]
+name = "http_demo"
+transport = "http"
+url = "{server_url}"
+""".strip(),
+                    encoding="utf-8",
+                )
+                settings = load_settings(config_path)
+
+                registry = create_default_tool_registry(settings)
+                result = registry.execute(
+                    ToolCall("http_demo.echo", {"text": "clean", "query": "bad"})
+                )
+
+        self.assertTrue(result.success)
+        self.assertEqual(_HttpMcpHandler.last_arguments, {"text": "clean"})
 
     def test_http_mcp_tool_error_result_fails_tool_result(self) -> None:
         _HttpMcpHandler.force_tool_error = True
@@ -1563,6 +1828,98 @@ def _demo_mcp_server_path() -> Path:
     return Path(__file__).resolve().parents[1] / "examples" / "mcp" / "demo_server.py"
 
 
+def _google_calendar_fastmcp_module():
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "examples"
+        / "mcp"
+        / "google_calendar_fastmcp_server.py"
+    )
+    spec = importlib.util.spec_from_file_location("google_calendar_fastmcp_server", path)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+@contextmanager
+def _calendar_api_server():
+    _CalendarApiHandler.reset()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _CalendarApiHandler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        yield f"http://{host}:{port}/calendar/v3"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+class _CalendarApiHandler(BaseHTTPRequestHandler):
+    """Local Google Calendar REST stand-in for wrapper tests."""
+
+    expected_token = "test-token"
+    last_authorization: str | None = None
+    last_query: dict[str, list[str]] = {}
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.last_authorization = None
+        cls.last_query = {}
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        type(self).last_authorization = self.headers.get("Authorization")
+        type(self).last_query = parse_qs(parsed.query)
+        expected = f"Bearer {self.expected_token}"
+        if self.headers.get("Authorization") != expected:
+            self._write_json({"error": {"message": "unauthorized"}}, status=401)
+            return
+        if parsed.path == "/calendar/v3/users/me/calendarList":
+            self._write_json(
+                {
+                    "items": [
+                        {
+                            "id": "primary",
+                            "summary": "Primary Calendar",
+                            "accessRole": "owner",
+                            "primary": True,
+                        }
+                    ]
+                }
+            )
+            return
+        if parsed.path == "/calendar/v3/calendars/primary/events":
+            self._write_json(
+                {
+                    "items": [
+                        {
+                            "id": "evt-1",
+                            "summary": "Planning Sync",
+                            "start": {"dateTime": "2026-07-04T09:00:00Z"},
+                            "end": {"dateTime": "2026-07-04T09:30:00Z"},
+                        }
+                    ]
+                }
+            )
+            return
+        self.send_error(404)
+
+    def _write_json(self, payload: dict[str, object], status: int = 200) -> None:
+        encoded = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def log_message(self, format: str, *args) -> None:
+        return
+
+
 @contextmanager
 def _http_mcp_server(require_token: bool = False):
     _HttpMcpHandler.require_token = require_token
@@ -1689,6 +2046,58 @@ def _oauth_server():
         server.shutdown()
         server.server_close()
         thread.join(timeout=2)
+
+
+@contextmanager
+def _tokeninfo_server():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _TokenInfoHandler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        yield f"http://{host}:{port}/tokeninfo"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+class _TokenInfoHandler(BaseHTTPRequestHandler):
+    """Local token-info endpoint for redacted auth debug tests."""
+
+    expected_token = "debug-access-token"
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        if parsed.path != "/tokeninfo":
+            self.send_error(404)
+            return
+        token = _first_query_value(parse_qs(parsed.query), "access_token")
+        if token != self.expected_token:
+            self.send_response(400)
+            self.send_header("Content-Type", "application/json")
+            payload = json.dumps({"error": "invalid_token"}).encode("utf-8")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+        payload = json.dumps(
+            {
+                "aud": "client-id",
+                "scope": "calendar.read",
+                "expires_in": "3600",
+                "email": "user@example.com",
+                "sub": "subject-id",
+            }
+        ).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, format: str, *args) -> None:
+        return
 
 
 class _OAuthHandler(BaseHTTPRequestHandler):

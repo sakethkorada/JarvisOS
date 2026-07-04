@@ -56,12 +56,13 @@ class ToolRegistry:
         """Execute a registered tool call and normalize failures."""
         spec = self.get(call.tool_name)
         try:
+            arguments = self.normalize_arguments(spec.name, call.arguments)
             if spec.name in self._context_handlers:
                 if context is None:
                     raise ValueError(f"{spec.name} requires execution context.")
-                output = self._context_handlers[spec.name](call.arguments, context)
+                output = self._context_handlers[spec.name](arguments, context)
             else:
-                output = self._handlers[spec.name](call.arguments)
+                output = self._handlers[spec.name](arguments)
             return ToolResult(tool_name=spec.name, output=output)
         except Exception as exc:  # pragma: no cover - defensive boundary
             return ToolResult(
@@ -75,6 +76,15 @@ class ToolRegistry:
         """Return registered tools in stable display order."""
         return sorted(self._specs.values(), key=lambda tool: tool.name)
 
+    def normalize_arguments(
+        self,
+        tool_name: str,
+        arguments: dict[str, object],
+    ) -> dict[str, object]:
+        """Normalize arguments according to a tool's declared input schema."""
+        spec = self.get(tool_name)
+        return _normalize_arguments_for_schema(spec.input_schema, arguments)
+
     def available_tools(self) -> tuple[AvailableTool, ...]:
         """Return planner-safe metadata for registered tools."""
         return tuple(
@@ -84,6 +94,43 @@ class ToolRegistry:
                 risk_level=tool.risk_level,
                 requires_approval=tool.requires_approval,
                 source=tool.source,
+                input_schema=tool.input_schema,
             )
             for tool in self.list()
         )
+
+
+def _normalize_arguments_for_schema(
+    input_schema: dict[str, object] | None,
+    arguments: dict[str, object],
+) -> dict[str, object]:
+    """Apply a conservative subset of JSON Schema object validation."""
+    if input_schema is None:
+        return dict(arguments)
+    if input_schema.get("type") not in (None, "object"):
+        return dict(arguments)
+
+    has_properties = "properties" in input_schema
+    properties = input_schema.get("properties", {})
+    required = input_schema.get("required", [])
+    if not isinstance(properties, dict):
+        properties = {}
+    if not isinstance(required, list):
+        required = []
+
+    missing = [
+        str(name)
+        for name in required
+        if isinstance(name, str) and name not in arguments
+    ]
+    if missing:
+        joined = ", ".join(missing)
+        raise ValueError(f"Missing required argument(s): {joined}")
+
+    if not has_properties:
+        return dict(arguments)
+    return {
+        key: value
+        for key, value in arguments.items()
+        if key in properties
+    }

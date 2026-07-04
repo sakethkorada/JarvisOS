@@ -64,3 +64,15 @@ Cloud model APIs should extend `jarvis.models` through provider classes and the
 existing router. Specialist sub-agents should extend `jarvis.agents`,
 `jarvis.prompts`, and `jarvis.orchestration` without bypassing tool validation,
 policy checks, approvals, or trace recording.
+
+Tool schemas belong on `ToolSpec`. External adapters such as MCP should preserve
+provider-declared input schemas during registration so planners can see valid
+argument shapes and the execution boundary can strip unsupported arguments or
+fail missing required fields before provider calls.
+
+Local MCP integration packs are a first-class extension path. A provider wrapper
+can run as a local stdio FastMCP server, call the provider's REST/API surface,
+and expose tools through the same `[[mcp.servers]]` configuration that hosted
+MCP servers use. JarvisOS should keep orchestration, policy, approvals, traces,
+and synthesis outside those wrappers; wrappers should own provider transport and
+schema details.

@@ -369,12 +369,16 @@ Manual bearer auth is still available as an escape hatch:
 $env:GOOGLE_MCP_ACCESS_TOKEN="<access-token>"
 python -m jarvis auth set-token google "<access-token>" --config google-calendar.toml
 python -m jarvis auth list --config google-calendar.toml
+python -m jarvis auth debug google --config google-calendar.toml
 python -m jarvis auth clear google --config google-calendar.toml
 ```
 
 The current auth layer stores provider tokens and supplies bearer headers to
 HTTP MCP. The OAuth flow is triggered by first use of a configured authenticated
 HTTP MCP server; no separate `jarvis auth login` command is required.
+`auth debug` prints redacted provider metadata, token expiry, configured
+scopes, granted scopes when the provider exposes token-info, and client-id
+matching details without printing access or refresh tokens.
 
 Per-tool policy overrides can make read-only tools auto-allowed while writes
 remain approval-gated:
@@ -394,6 +398,34 @@ requires_approval = true
 Read-only MCP servers should usually be low risk and auto-allowed. Write,
 send, post, playback, purchase, booking, or externally visible MCP tools should
 be configured to require approval.
+
+Local FastMCP wrappers are the preferred pattern when a provider's hosted MCP
+server is unavailable, preview-gated, or not flexible enough. The wrapper runs
+as a local stdio MCP server, owns provider-specific REST/API calls, and exposes
+normal MCP tools back to JarvisOS. Install the optional MCP tooling with:
+
+```powershell
+uv pip install -e ".[mcp]"
+```
+
+You do not start stdio MCP servers manually. JarvisOS starts the configured
+server process when it discovers tools or executes a tool call. The current MCP
+client uses short-lived subprocess sessions, which is simple and reliable for
+the POC; persistent MCP sessions can be added later if startup overhead matters.
+For stdio servers, `command = "python"` resolves to the same Python interpreter
+that is running JarvisOS, so venv-installed MCP dependencies are visible to the
+subprocess.
+JarvisOS uses newline-delimited JSON-RPC for stdio MCP, matching the current MCP
+transport spec and FastMCP.
+
+The local Google Calendar FastMCP example wraps Google Calendar REST reads while
+still registering tools as `google_calendar.*`:
+
+```powershell
+Copy-Item examples/mcp/google-calendar-fastmcp.toml.example google-calendar-fastmcp.toml
+python -m jarvis tools --config google-calendar-fastmcp.toml
+python -m jarvis run "Use Google Calendar to list my calendars" --config google-calendar-fastmcp.toml
+```
 
 Try the demo server:
 

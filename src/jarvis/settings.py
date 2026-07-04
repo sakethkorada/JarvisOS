@@ -85,6 +85,7 @@ class OAuthProviderSettings:
     client_secret_env: str | None = None
     authorization_url: str | None = None
     token_url: str | None = None
+    tokeninfo_url: str | None = None
     redirect_uri: str | None = None
     scopes: tuple[str, ...] = ()
 
@@ -390,6 +391,7 @@ def _oauth_providers_from_data(data: dict[str, Any]) -> list[OAuthProviderSettin
                 client_secret_env=_optional_string(item.get("client_secret_env")),
                 authorization_url=_optional_string(item.get("authorization_url")),
                 token_url=_optional_string(item.get("token_url")),
+                tokeninfo_url=_optional_string(item.get("tokeninfo_url")),
                 redirect_uri=_optional_string(item.get("redirect_uri")),
                 scopes=tuple(_string_list(item.get("scopes"))),
             )

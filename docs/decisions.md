@@ -306,3 +306,58 @@ Tradeoff: the current flow requires a configured provider and redirect URI. It
 does not yet implement MCP protected-resource metadata discovery, dynamic client
 registration, encrypted token storage, or provider-specific account selection
 UX.
+
+## 0029 - Preserve Tool Input Schemas
+
+MCP `inputSchema` values are now stored on `ToolSpec`, exposed to the planner,
+and used at the tool execution boundary for conservative argument cleanup.
+
+Reason: LLM planners may choose the right tool but invent generic arguments such
+as `query`. Provider tools should receive only arguments declared by their
+schema, and missing required fields should fail before the provider call.
+
+Tradeoff: JarvisOS currently implements only a small object-schema subset:
+declared properties and required fields. A full JSON Schema validator can be
+added later if real integrations need deeper type, enum, or nested validation.
+
+## 0030 - Add Redacted OAuth Debugging
+
+JarvisOS now exposes `jarvis auth debug <provider>` to inspect stored OAuth
+metadata, configured scopes, token expiry, granted scopes from provider
+token-info endpoints, and client-id matching without printing access or refresh
+tokens.
+
+Reason: real MCP/API integrations can fail because of app scopes, stale tokens,
+OAuth client mismatch, provider admin policy, or application code. A redacted
+debug command helps separate those causes before changing runtime logic.
+
+Tradeoff: token-info is provider-specific. JarvisOS supports a configurable
+`tokeninfo_url` and a Google default, while providers without token-info still
+show local stored-token and configured-scope metadata.
+
+## 0031 - Prefer Local FastMCP Wrappers For Provider POCs
+
+JarvisOS now includes a local FastMCP Google Calendar wrapper example that calls
+Google Calendar REST APIs but exposes them back to JarvisOS as MCP tools.
+
+Reason: hosted provider MCP servers can be preview-gated or unavailable even
+when the underlying REST API and OAuth token work. A local MCP wrapper proves
+the same JarvisOS orchestration path without hardcoding provider branches into
+the orchestrator.
+
+Tradeoff: the first wrapper shares JarvisOS auth storage for convenience. Longer
+term, integration packs may own their own auth or receive tokens through a more
+formal local integration contract.
+
+## 0032 - Use Newline-Delimited JSON For Stdio MCP
+
+JarvisOS now sends stdio MCP messages as one JSON-RPC object per line and keeps
+a compatibility reader for legacy `Content-Length` framed responses.
+
+Reason: the current MCP stdio transport specifies newline-delimited JSON-RPC,
+and FastMCP/Python SDK servers expect that framing. The older `Content-Length`
+approach caused FastMCP servers to treat headers as invalid JSON.
+
+Tradeoff: legacy header-framed stdio servers may need to accept newline-delimited
+requests or be wrapped. JarvisOS still reads header-framed responses to preserve
+some backward compatibility with the early demo server shape.

@@ -12,6 +12,11 @@ Use Google's remote Calendar MCP server or a trusted local Calendar MCP server.
 Configure it under `[[mcp.servers]]`, then use per-tool overrides so read-only
 tools can run automatically while writes require approval.
 
+For the current POC, prefer the local FastMCP wrapper if Google's hosted
+Calendar MCP server discovers tools but returns `The caller does not have
+permission` during execution. The local wrapper calls Google Calendar REST with
+the same JarvisOS OAuth token and exposes read tools through MCP stdio.
+
 Useful read-only Calendar tools from Google's documented Workspace MCP surface:
 
 - `list_calendars`
@@ -87,8 +92,41 @@ $env:GOOGLE_MCP_ACCESS_TOKEN="<access-token>"
 python -m jarvis auth set-token google "<access-token>" --config google-calendar.toml
 ```
 
+When Google Calendar MCP returns `The caller does not have permission`, inspect
+the stored token before changing runtime code:
+
+```powershell
+python -m jarvis auth debug google --config google-calendar.toml
+```
+
+Check whether the granted scopes include the configured Calendar scopes, whether
+the token is expired, and whether the token audience or authorized party matches
+the configured OAuth client id. The command redacts access and refresh tokens.
+
 Do not commit local configs that contain client IDs, token references, or other
 private integration details.
+
+## Local FastMCP Calendar Wrapper
+
+Install the optional MCP dependency:
+
+```powershell
+uv pip install -e ".[mcp]"
+```
+
+Copy the example config and ensure its `--config` argument points to your local
+JarvisOS config that contains the Google OAuth provider:
+
+```powershell
+Copy-Item examples/mcp/google-calendar-fastmcp.toml.example google-calendar-fastmcp.toml
+python -m jarvis tools --config google-calendar-fastmcp.toml
+python -m jarvis run "Use Google Calendar to list my calendars" --config google-calendar-fastmcp.toml
+```
+
+The example registers the local server as `google_calendar`, so the user-facing
+tool names remain `google_calendar.list_calendars` and
+`google_calendar.list_events`. Use the local wrapper instead of the hosted
+Google Calendar MCP server in a single config to avoid duplicate tool names.
 
 ## Near-Term Recommendation
 
@@ -97,7 +135,7 @@ Keep the next Google slice read-only:
 ```text
 User request
   -> planner
-  -> Google Calendar MCP read tool
+  -> Google Calendar MCP read tool, hosted or local FastMCP
   -> general.generate_text for summary or agenda
   -> synthesis
   -> trace

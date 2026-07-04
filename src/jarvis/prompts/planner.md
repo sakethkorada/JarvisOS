@@ -15,6 +15,8 @@ Schema:
 
 Rules:
 - Use only available tools.
+- Follow each tool's input_schema exactly. Do not include argument keys that are
+  not listed in the tool schema.
 - Prefer read-only tools before summary tools.
 - When a user names a provider or external service, prefer that provider's
   registered MCP/plugin tools over built-in demo tools.

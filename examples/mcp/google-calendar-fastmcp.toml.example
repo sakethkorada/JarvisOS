@@ -1,0 +1,34 @@
+# Local FastMCP Google Calendar config for JarvisOS.
+# Requires FastMCP in the active environment:
+# uv pip install fastmcp
+#
+# Before using this server, authenticate Google through JarvisOS once so your
+# configured auth database contains a stored provider token:
+# python -m jarvis auth debug google
+#
+# The --config argument should point to your local JarvisOS config that contains
+# the google OAuth provider. The MCP subprocess uses it only to find the auth DB
+# and silently refresh expired tokens.
+
+[[mcp.servers]]
+name = "google_calendar"
+command = "python"
+args = [
+  "examples/mcp/google_calendar_fastmcp_server.py",
+  "--config",
+  "jarvis.toml",
+  "--provider",
+  "google",
+]
+risk_level = "low"
+requires_approval = false
+
+[[mcp.servers.tools]]
+name = "list_calendars"
+risk_level = "low"
+requires_approval = false
+
+[[mcp.servers.tools]]
+name = "list_events"
+risk_level = "low"
+requires_approval = false

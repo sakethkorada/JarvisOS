@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -291,7 +292,7 @@ class _mcp_process:
 
     def __enter__(self) -> McpSession:
         self._process = subprocess.Popen(
-            [self._server.command, *self._server.args],
+            [_resolved_command(self._server.command), *self._server.args],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -354,6 +355,7 @@ def load_mcp_tools(
                     risk_level=risk_level,
                     requires_approval=requires_approval,
                     source=f"mcp:{server.name}",
+                    input_schema=_tool_input_schema(tool),
                 ),
                 lambda arguments, binding=binding: _execute_mcp_tool(
                     binding,
@@ -379,6 +381,13 @@ def _mcp_tool_policy(
     return risk_level, requires_approval
 
 
+def _tool_input_schema(tool: dict[str, Any]) -> dict[str, Any] | None:
+    schema = tool.get("inputSchema")
+    if isinstance(schema, dict):
+        return schema
+    return None
+
+
 def _execute_mcp_tool(
     binding: McpToolBinding,
     arguments: dict[str, Any],
@@ -401,6 +410,15 @@ def _mcp_client(
     if server.transport == "http":
         return McpHttpClient(server, auth_store, oauth_manager)
     return McpStdioClient(server)
+
+
+def _resolved_command(command: str | None) -> str:
+    """Resolve stdio server commands that should share JarvisOS' interpreter."""
+    if command in {"python", "python.exe"}:
+        return sys.executable
+    if command is None:
+        raise RuntimeError("MCP stdio server command is required.")
+    return command
 
 
 def _bearer_token(
@@ -503,15 +521,42 @@ def _write_message(
     if process.stdin is None:
         raise RuntimeError("MCP process stdin is unavailable.")
     body = json.dumps(message, separators=(",", ":")).encode("utf-8")
-    header = f"Content-Length: {len(body)}\r\n\r\n".encode("ascii")
-    process.stdin.write(header + body)
+    process.stdin.write(body + b"\n")
     process.stdin.flush()
 
 
 def _read_message(process: subprocess.Popen[bytes]) -> dict[str, Any]:
     if process.stdout is None:
         raise RuntimeError("MCP process stdout is unavailable.")
+    while True:
+        line = process.stdout.readline()
+        if line == b"":
+            detail = _process_error_detail(process)
+            raise RuntimeError(f"MCP process exited before sending a message.{detail}")
+        decoded = line.decode("utf-8").strip()
+        if not decoded:
+            continue
+        if decoded.lower().startswith("content-length:"):
+            return _read_header_framed_message(process, decoded)
+        try:
+            message = json.loads(decoded)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"MCP process wrote invalid stdout: {decoded}") from exc
+        if not isinstance(message, dict):
+            raise RuntimeError("MCP stdio message must be a JSON object.")
+        return message
+
+
+def _read_header_framed_message(
+    process: subprocess.Popen[bytes],
+    first_header: str,
+) -> dict[str, Any]:
+    """Read legacy Content-Length framed stdio messages."""
+    if process.stdout is None:
+        raise RuntimeError("MCP process stdout is unavailable.")
     headers: dict[str, str] = {}
+    key, value = first_header.split(":", 1)
+    headers[key.lower()] = value.strip()
     while True:
         line = process.stdout.readline()
         if line in (b"\r\n", b"\n", b""):
@@ -524,4 +569,21 @@ def _read_message(process: subprocess.Popen[bytes]) -> dict[str, Any]:
     if length <= 0:
         raise RuntimeError("MCP message is missing Content-Length.")
     body = process.stdout.read(length)
-    return json.loads(body.decode("utf-8"))
+    message = json.loads(body.decode("utf-8"))
+    if not isinstance(message, dict):
+        raise RuntimeError("MCP stdio message must be a JSON object.")
+    return message
+
+
+def _process_error_detail(process: subprocess.Popen[bytes]) -> str:
+    if process.stderr is None:
+        return ""
+    if process.poll() is None:
+        try:
+            process.wait(timeout=0.2)
+        except subprocess.TimeoutExpired:
+            return ""
+    detail = process.stderr.read().decode("utf-8", errors="replace").strip()
+    if not detail:
+        return ""
+    return f" Stderr: {detail[-2000:]}"

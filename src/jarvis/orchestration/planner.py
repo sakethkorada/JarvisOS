@@ -226,6 +226,10 @@ class Planner:
             if not isinstance(description, str) or not description.strip():
                 return None
             arguments = _normalize_arguments(tool_name, arguments, goal)
+            try:
+                arguments = self._tools.normalize_arguments(tool_name, arguments)
+            except ValueError:
+                return None
 
             agent_name = _agent_for_tool(tool_name)
             if not _agent_can_use_tool(self._agents, agent_name, tool_name):
@@ -252,6 +256,7 @@ def _planner_context(available_tools: tuple[AvailableTool, ...]) -> str:
             "risk_level": tool.risk_level,
             "requires_approval": tool.requires_approval,
             "source": tool.source,
+            "input_schema": tool.input_schema,
         }
         for tool in available_tools
     ]

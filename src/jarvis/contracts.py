@@ -63,6 +63,7 @@ class ToolSpec:
     risk_level: RiskLevel = "low"
     requires_approval: bool = False
     source: str = "builtin"
+    input_schema: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -74,6 +75,7 @@ class AvailableTool:
     risk_level: RiskLevel
     requires_approval: bool
     source: str
+    input_schema: dict[str, Any] | None = None
 
 
 ToolHandler = Callable[[dict[str, Any]], dict[str, Any]]

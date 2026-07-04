@@ -30,6 +30,12 @@
   for HTTP MCP.
 - Added on-demand OAuth authorization-code + PKCE flow with local callback
   capture and refresh-token renewal.
+- Added MCP input-schema preservation and conservative argument cleanup.
+- Added redacted `auth debug` diagnostics for OAuth providers.
+- Added a local FastMCP Google Calendar wrapper example around Calendar REST
+  read tools.
+- Updated stdio MCP to newline-delimited JSON-RPC and verified the local
+  FastMCP Calendar wrapper against the user's real Calendar account.
 
 Current model behavior:
 
@@ -61,22 +67,27 @@ Why this should come before LLM-driven planning:
 
 ## Recommended Next Steps
 
-1. Try Google Calendar read-only tools first, especially listing calendars,
+1. Add a direct `jarvis tool call <tool_name> --args-json "{}"` command to test
+   registered tools without planner/synthesis noise.
+2. Improve planner argument construction and repair for MCP tools, starting
+   with Calendar list-events time bounds.
+3. Try Google Calendar read-only tools beyond calendar listing, especially
    listing events, and getting one event.
-2. Add dynamic MCP auth discovery and dynamic client registration if Google's
+4. Add dynamic MCP auth discovery and dynamic client registration if Google's
    remote MCP surface needs it.
-3. Add Gmail read-only and draft-only paths after Calendar reads work.
-4. Add Spotify read tools or low-impact playback tools behind per-tool policy.
-5. Add encrypted token storage or OS keychain support before broader daily use.
-6. Add resume/apply behavior for approved external or high-risk tool execution
+5. Add Gmail read-only and draft-only paths after Calendar reads work, likely as
+   a local FastMCP wrapper first.
+6. Add Spotify read tools or low-impact playback tools behind per-tool policy.
+7. Add encrypted token storage or OS keychain support before broader daily use.
+8. Add resume/apply behavior for approved external or high-risk tool execution
    items.
-7. Add trace filtering, timing, and basic metrics for benchmarking.
-8. Expand plugin support with enable/disable state and clearer validation errors.
-9. Add richer agent config files for specialists once prompt-only overrides feel
+9. Add trace filtering, timing, and basic metrics for benchmarking.
+10. Expand plugin support with enable/disable state and clearer validation errors.
+11. Add richer agent config files for specialists once prompt-only overrides feel
    too narrow.
-10. Add named step outputs or richer workflow variables once `$last.text` becomes
+12. Add named step outputs or richer workflow variables once `$last.text` becomes
    too narrow.
-11. Add online plugin acquisition later as a separate installer layer.
+13. Add online plugin acquisition later as a separate installer layer.
 
 ## Near-Term Design Notes
 

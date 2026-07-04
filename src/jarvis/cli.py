@@ -7,6 +7,9 @@ import json
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from jarvis.agents import default_agent_registry
 from jarvis.contracts import ApprovalRecord, MemoryRecord, TaskRecord
@@ -23,6 +26,9 @@ from jarvis.storage.approvals import apply_approved_record
 from jarvis.storage.auth import AuthStore
 from jarvis.storage.memory import MemoryStore
 from jarvis.storage.traces import TraceSummary
+
+
+GOOGLE_TOKENINFO_URL = "https://oauth2.googleapis.com/tokeninfo"
 
 
 def _json_default(value: Any) -> Any:
@@ -203,6 +209,17 @@ def _build_parser() -> argparse.ArgumentParser:
     auth_clear = auth_subparsers.add_parser("clear", help="Clear stored provider auth.")
     auth_clear.add_argument("provider", help="Provider name to clear.")
     auth_clear.add_argument("--config", type=Path, help="Path to config.")
+    auth_debug = auth_subparsers.add_parser(
+        "debug",
+        help="Inspect provider auth metadata without printing tokens.",
+    )
+    auth_debug.add_argument("provider", help="Provider name from config.")
+    auth_debug.add_argument(
+        "--json",
+        action="store_true",
+        help="Print debug metadata as JSON.",
+    )
+    auth_debug.add_argument("--config", type=Path, help="Path to config.")
     return parser
 
 
@@ -381,6 +398,13 @@ def main() -> None:
             status = "cleared" if deleted else "not found"
             print(f"{args.provider}: {status}")
             return
+        if args.auth_command == "debug":
+            debug = _auth_debug(settings, auth_store, args.provider)
+            if args.json:
+                print(json.dumps(debug, default=_json_default, indent=2))
+            else:
+                _print_auth_debug(debug)
+            return
 
     parser.error(f"Unknown command: {args.command}")
 
@@ -439,3 +463,175 @@ def _print_stored_trace(stored_trace: Any) -> None:
     print("")
     print("Final response:")
     print(stored_trace.final_response)
+
+
+def _auth_debug(
+    settings: Any,
+    auth_store: AuthStore,
+    provider_name: str,
+) -> dict[str, Any]:
+    """Return redacted OAuth debug metadata for one provider."""
+    provider = _oauth_provider(settings, provider_name)
+    record = auth_store.get_token(provider_name)
+    debug: dict[str, Any] = {
+        "provider": provider_name,
+        "auth_database_path": settings.auth.database_path,
+        "provider_configured": provider is not None,
+        "token_stored": record is not None,
+        "refresh_token_stored": bool(record and record.refresh_token),
+        "expires_at": record.expires_at if record else None,
+        "token_expired": auth_store.token_is_expired(record) if record else None,
+        "configured_scopes": list(provider.scopes) if provider else [],
+        "tokeninfo": None,
+    }
+    if provider is None or record is None:
+        return debug
+
+    tokeninfo_url = _tokeninfo_url(provider)
+    debug["tokeninfo_url_configured"] = tokeninfo_url is not None
+    if tokeninfo_url is None:
+        return debug
+
+    tokeninfo = _fetch_tokeninfo(tokeninfo_url, record.access_token)
+    debug["tokeninfo"] = tokeninfo
+    granted_scopes = _scope_set(tokeninfo.get("scope"))
+    configured_scopes = set(provider.scopes)
+    if granted_scopes:
+        debug["granted_scopes"] = sorted(granted_scopes)
+        debug["missing_configured_scopes"] = sorted(configured_scopes - granted_scopes)
+        debug["extra_granted_scopes"] = sorted(granted_scopes - configured_scopes)
+    if provider.client_id:
+        audience = tokeninfo.get("aud")
+        authorized_party = tokeninfo.get("azp")
+        debug["client_id_matches_audience"] = provider.client_id in {
+            audience,
+            authorized_party,
+        }
+    return debug
+
+
+def _oauth_provider(settings: Any, provider_name: str) -> Any | None:
+    for provider in settings.auth.oauth_providers:
+        if provider.name == provider_name:
+            return provider
+    return None
+
+
+def _tokeninfo_url(provider: Any) -> str | None:
+    if provider.tokeninfo_url:
+        return provider.tokeninfo_url
+    if provider.name == "google":
+        return GOOGLE_TOKENINFO_URL
+    return None
+
+
+def _fetch_tokeninfo(tokeninfo_url: str, access_token: str) -> dict[str, Any]:
+    """Call a provider token-info endpoint without exposing token material."""
+    url = f"{tokeninfo_url}?{urlencode({'access_token': access_token})}"
+    request = Request(url, headers={"Accept": "application/json"})
+    try:
+        with urlopen(request, timeout=15) as response:
+            payload = response.read().decode("utf-8")
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace").strip()
+        return {
+            "ok": False,
+            "status": exc.code,
+            "error": _safe_http_detail(detail),
+        }
+    except URLError as exc:
+        return {"ok": False, "error": f"Network error: {exc.reason}"}
+    data = json.loads(payload)
+    if not isinstance(data, dict):
+        return {"ok": False, "error": "Token info response was not an object."}
+    return _redacted_tokeninfo(data)
+
+
+def _redacted_tokeninfo(data: dict[str, Any]) -> dict[str, Any]:
+    redacted: dict[str, Any] = {"ok": True}
+    safe_keys = (
+        "aud",
+        "azp",
+        "scope",
+        "expires_in",
+        "access_type",
+        "token_type",
+        "issued_to",
+    )
+    for key in safe_keys:
+        if key in data:
+            redacted[key] = data[key]
+    if "email" in data:
+        redacted["email_present"] = True
+    if "sub" in data:
+        redacted["subject_present"] = True
+    return redacted
+
+
+def _safe_http_detail(detail: str) -> str:
+    if not detail:
+        return "Token info request failed."
+    try:
+        data = json.loads(detail)
+    except json.JSONDecodeError:
+        return detail[:500]
+    if not isinstance(data, dict):
+        return detail[:500]
+    safe = {
+        key: data[key]
+        for key in ("error", "error_description")
+        if key in data
+    }
+    return json.dumps(safe or {"error": "Token info request failed."}, sort_keys=True)
+
+
+def _scope_set(scope_value: Any) -> set[str]:
+    if not isinstance(scope_value, str):
+        return set()
+    return {scope for scope in scope_value.split() if scope}
+
+
+def _print_auth_debug(debug: dict[str, Any]) -> None:
+    """Print redacted OAuth debug information."""
+    print(f"Provider: {debug['provider']}")
+    print(f"Configured: {_yes_no(debug['provider_configured'])}")
+    print(f"Auth database: {debug['auth_database_path']}")
+    print(f"Token stored: {_yes_no(debug['token_stored'])}")
+    print(f"Refresh token stored: {_yes_no(debug['refresh_token_stored'])}")
+    print(f"Expires at: {debug['expires_at'] or 'unknown'}")
+    expired = debug["token_expired"]
+    print(f"Token expired: {'unknown' if expired is None else _yes_no(expired)}")
+
+    configured_scopes = debug.get("configured_scopes", [])
+    if configured_scopes:
+        print("Configured scopes:")
+        for scope in configured_scopes:
+            print(f"- {scope}")
+
+    tokeninfo = debug.get("tokeninfo")
+    if tokeninfo is None:
+        print("Token info: unavailable")
+        return
+    if not tokeninfo.get("ok"):
+        print(f"Token info error: {tokeninfo.get('error', 'unknown error')}")
+        return
+    print("Token info: ok")
+    for key in ("aud", "azp", "expires_in", "access_type", "token_type"):
+        if key in tokeninfo:
+            print(f"{key}: {tokeninfo[key]}")
+    if "client_id_matches_audience" in debug:
+        print(f"Client id matches token: {_yes_no(debug['client_id_matches_audience'])}")
+    granted_scopes = debug.get("granted_scopes", [])
+    if granted_scopes:
+        print("Granted scopes:")
+        for scope in granted_scopes:
+            print(f"- {scope}")
+    missing = debug.get("missing_configured_scopes", [])
+    if missing:
+        print("Missing configured scopes:")
+        for scope in missing:
+            print(f"- {scope}")
+
+
+def _yes_no(value: bool) -> str:
+    return "yes" if value else "no"

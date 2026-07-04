@@ -70,12 +70,30 @@ def _handle_message(message: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def _read_message() -> dict[str, Any] | None:
+    line = sys.stdin.buffer.readline()
+    if line == b"":
+        return None
+    decoded = line.decode("utf-8").strip()
+    if not decoded:
+        return None
+    if decoded.lower().startswith("content-length:"):
+        return _read_header_framed_message(decoded)
+    return json.loads(decoded)
+
+
+def _write_message(message: dict[str, Any]) -> None:
+    body = json.dumps(message, separators=(",", ":")).encode("utf-8")
+    sys.stdout.buffer.write(body + b"\n")
+    sys.stdout.buffer.flush()
+
+
+def _read_header_framed_message(first_header: str) -> dict[str, Any]:
     headers: dict[str, str] = {}
+    key, value = first_header.split(":", 1)
+    headers[key.lower()] = value.strip()
     while True:
         line = sys.stdin.buffer.readline()
-        if line == b"":
-            return None
-        if line in (b"\r\n", b"\n"):
+        if line in (b"\r\n", b"\n", b""):
             break
         decoded = line.decode("ascii").strip()
         if ":" in decoded:
@@ -83,16 +101,9 @@ def _read_message() -> dict[str, Any] | None:
             headers[key.lower()] = value.strip()
     length = int(headers.get("content-length", "0"))
     if length <= 0:
-        return None
+        raise RuntimeError("MCP message is missing Content-Length.")
     body = sys.stdin.buffer.read(length)
     return json.loads(body.decode("utf-8"))
-
-
-def _write_message(message: dict[str, Any]) -> None:
-    body = json.dumps(message, separators=(",", ":")).encode("utf-8")
-    sys.stdout.buffer.write(f"Content-Length: {len(body)}\r\n\r\n".encode("ascii"))
-    sys.stdout.buffer.write(body)
-    sys.stdout.buffer.flush()
 
 
 if __name__ == "__main__":

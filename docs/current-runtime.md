@@ -37,6 +37,10 @@ CLI command
   config overrides.
 - Configured MCP stdio and HTTP servers can expose tools into the shared
   ToolRegistry.
+- Local FastMCP wrappers can be configured as stdio MCP servers; the first
+  example wraps Google Calendar REST read tools.
+- MCP tool `inputSchema` values are preserved on `ToolSpec`, exposed to the
+  planner, and used for conservative argument cleanup before execution.
 - `general.generate_text` can generate intermediate text with the selected
   model before another tool uses it.
 - Plan steps can pass the previous successful tool result's `text` field with
@@ -56,12 +60,15 @@ CLI command
 - MCP server tools can be loaded from `[[mcp.servers]]` config entries.
 - MCP tools can override server-level risk and approval settings with
   `[[mcp.servers.tools]]`.
+- Tool execution strips arguments that are not declared by a tool's object
+  input schema and fails cleanly when required schema fields are missing.
 - HTTP MCP tools can receive bearer tokens from an environment variable or the
   local SQLite auth store.
 - Authenticated HTTP MCP tools can trigger OAuth authorization-code + PKCE on
   first use, then store and reuse the returned tokens.
 - Expired access tokens are refreshed when a refresh token is available.
-- `jarvis auth list/set-token/clear` manages stored provider access tokens.
+- `jarvis auth list/set-token/debug/clear` manages and inspects stored provider
+  access tokens without printing token values.
 - `memory.search` uses a local SQLite-backed memory store.
 - `jarvis memory add/search/list` manage local memory records.
 - `task.create` writes low-risk local tasks to SQLite without approval.
@@ -86,6 +93,16 @@ CLI command
 - MCP support covers stdio and basic streamable HTTP tool discovery/calls.
   MCP resources, prompts, full SSE streaming, and long-lived sessions can come
   later.
+- Stdio MCP servers are started automatically as short-lived subprocesses during
+  tool discovery and tool execution; users do not run them manually.
+- For stdio MCP config, `command = "python"` resolves to the interpreter running
+  JarvisOS so virtualenv dependencies are shared with local MCP subprocesses.
+- Stdio MCP uses newline-delimited JSON-RPC. Legacy Content-Length responses can
+  still be read for compatibility, but JarvisOS sends newline-delimited MCP
+  messages.
+- The local Google Calendar FastMCP wrapper currently exposes read-only list
+  tools. It depends on optional FastMCP dependencies and an existing JarvisOS
+  Google OAuth token.
 - OAuth support includes provider metadata, local callback handling,
   authorization-code + PKCE, token exchange, and refresh-token renewal.
   Dynamic MCP auth discovery, dynamic client registration, and encrypted token
@@ -117,8 +134,11 @@ python -m jarvis traces show <run_id> --config jarvis.toml.example
 python -m jarvis approvals list --config jarvis.toml.example
 python -m jarvis approvals show <approval_id> --config jarvis.toml.example
 python -m jarvis auth list --config jarvis.toml.example
+python -m jarvis auth debug google --config google-calendar.toml
 python -m jarvis auth set-token google "<access-token>" --config google-calendar.toml
 python -m jarvis auth clear google --config google-calendar.toml
+python -m jarvis tools --config google-calendar-fastmcp.toml
+python -m jarvis run "Use Google Calendar to list my calendars" --config google-calendar-fastmcp.toml
 python -m jarvis run "Create a task to ask Jordan about API migration" --config jarvis.toml.example --model fake-local
 python -m jarvis tasks list --config jarvis.toml.example
 python -m jarvis tasks complete <task_id> --config jarvis.toml.example
@@ -142,6 +162,8 @@ python -m unittest discover -s tests
   integrations.
 - `auth list` shows which providers have stored tokens without printing secret
   values.
+- `auth debug <provider>` shows redacted token metadata, token-info scope
+  checks when available, and client-id matching without printing token values.
 - `auth clear <provider>` deletes a stored token.
 - `tasks list --limit N` prints recent local tasks.
 - `tasks show <task_id>` prints one task.

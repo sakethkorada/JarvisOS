@@ -17,6 +17,7 @@ venv/
 !.env.example
 jarvis.toml
 mcp-demo.toml
+google-calendar-fastmcp.toml
 local*.toml
 
 # Runtime state
@@ -24,6 +25,7 @@ local*.toml
 *.sqlite
 *.sqlite3
 *.db
+*.egg-info/
 logs/
 traces/
 
