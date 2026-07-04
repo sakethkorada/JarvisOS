@@ -340,6 +340,21 @@ risk_level = "low"
 requires_approval = false
 ```
 
+Per-tool policy overrides can make read-only tools auto-allowed while writes
+remain approval-gated:
+
+```toml
+[[mcp.servers.tools]]
+name = "list_events"
+risk_level = "low"
+requires_approval = false
+
+[[mcp.servers.tools]]
+name = "create_event"
+risk_level = "medium"
+requires_approval = true
+```
+
 Read-only MCP servers should usually be low risk and auto-allowed. Write,
 send, post, playback, purchase, booking, or externally visible MCP tools should
 be configured to require approval.
@@ -356,6 +371,11 @@ python -m jarvis run "Generate a fun fact about JarvisOS and echo it with the de
 The echo server only echoes input. If the run produces a new fun fact or draft,
 that text came from `general.generate_text`; the MCP tool then acted on the
 generated text.
+
+See `docs/integrations/google-workspace-mcp.md` for the current Google
+Workspace MCP notes. JarvisOS supports stdio MCP today; Google's official
+Workspace MCP servers are HTTP/OAuth-based, so they need an HTTP MCP transport
+and OAuth handling before they can be used directly.
 
 ## Local Memory
 

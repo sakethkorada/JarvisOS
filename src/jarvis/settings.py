@@ -43,6 +43,15 @@ class PluginSettings:
 
 
 @dataclass(frozen=True)
+class McpToolSettings:
+    """Per-tool policy override for one MCP server tool."""
+
+    name: str
+    risk_level: str | None = None
+    requires_approval: bool | None = None
+
+
+@dataclass(frozen=True)
 class McpServerSettings:
     """Configuration for one MCP stdio server."""
 
@@ -52,6 +61,7 @@ class McpServerSettings:
     enabled: bool = True
     risk_level: str = "low"
     requires_approval: bool = False
+    tools: tuple[McpToolSettings, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -287,6 +297,7 @@ def _mcp_servers_from_data(data: dict[str, Any]) -> list[McpServerSettings]:
             item.get("requires_approval"),
             default=False,
         )
+        tool_overrides = tuple(_mcp_tools_from_data(item.get("tools", [])))
         servers.append(
             McpServerSettings(
                 name=name,
@@ -295,9 +306,37 @@ def _mcp_servers_from_data(data: dict[str, Any]) -> list[McpServerSettings]:
                 enabled=enabled,
                 risk_level=risk_level,
                 requires_approval=requires_approval,
+                tools=tool_overrides,
             )
         )
     return servers
+
+
+def _mcp_tools_from_data(value: Any) -> list[McpToolSettings]:
+    tools: list[McpToolSettings] = []
+    if value is None:
+        return tools
+    if not isinstance(value, list):
+        raise ValueError("Expected MCP server tools to be a list of tables.")
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("Expected each MCP server tool override to be a table.")
+        name = _optional_string(item.get("name"))
+        if name is None:
+            raise ValueError("MCP server tool overrides require name.")
+        requires_approval = (
+            _optional_bool(item["requires_approval"], default=False)
+            if "requires_approval" in item
+            else None
+        )
+        tools.append(
+            McpToolSettings(
+                name=name,
+                risk_level=_optional_string(item.get("risk_level")),
+                requires_approval=requires_approval,
+            )
+        )
+    return tools
 
 
 def _table(data: dict[str, Any], key: str) -> dict[str, Any]:

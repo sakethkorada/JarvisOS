@@ -247,3 +247,23 @@ rewrite, and summarize through the model router.
 Tradeoff: `$last.text` is intentionally small. It proves vertical data flow
 without introducing a full workflow variable system before real integrations
 create pressure for it.
+
+## 0024 - Split Runtime Packages After the Generalist Slice
+
+JarvisOS now groups code by subsystem: orchestration, tools, models,
+integrations, and storage. Old top-level imports remain available through
+compatibility exports.
+
+Reason: the generalist slice clarified the highest-pressure boundaries. The
+package split keeps Calendar, Spotify, cloud providers, and richer sub-agent
+work from crowding the flat `src/jarvis/` package.
+
+## 0025 - Apply MCP Policy Overrides at Tool Registration
+
+MCP servers can define server-level policy defaults and per-tool overrides.
+JarvisOS applies these when registering `ToolSpec` entries.
+
+Reason: the planner, policy engine, CLI tool listing, and trace records should
+all see one consistent tool policy. Calendar reads can be auto-allowed while
+Calendar writes, Gmail sends, playback controls, and destructive actions remain
+approval-gated.

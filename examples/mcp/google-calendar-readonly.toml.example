@@ -1,0 +1,48 @@
+# Example JarvisOS config for a trusted local Google Calendar MCP stdio server.
+# Replace the command and args with the installed server's real launch command.
+
+[[mcp.servers]]
+name = "google_calendar"
+command = "python"
+args = ["path/to/google_calendar_mcp_server.py"]
+risk_level = "medium"
+requires_approval = true
+
+# Read-only Calendar tools can run automatically.
+
+[[mcp.servers.tools]]
+name = "list_calendars"
+risk_level = "low"
+requires_approval = false
+
+[[mcp.servers.tools]]
+name = "list_events"
+risk_level = "low"
+requires_approval = false
+
+[[mcp.servers.tools]]
+name = "get_event"
+risk_level = "low"
+requires_approval = false
+
+# Calendar writes remain approval-gated.
+
+[[mcp.servers.tools]]
+name = "create_event"
+risk_level = "medium"
+requires_approval = true
+
+[[mcp.servers.tools]]
+name = "update_event"
+risk_level = "medium"
+requires_approval = true
+
+[[mcp.servers.tools]]
+name = "delete_event"
+risk_level = "high"
+requires_approval = true
+
+[[mcp.servers.tools]]
+name = "respond_to_event"
+risk_level = "medium"
+requires_approval = true

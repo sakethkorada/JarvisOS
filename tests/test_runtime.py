@@ -380,6 +380,35 @@ requires_approval = false
         self.assertEqual(settings.mcp.servers[0].name, "demo_mcp")
         self.assertEqual(settings.mcp.servers[0].args, ("demo_server.py",))
 
+    def test_loads_mcp_tool_policy_overrides_from_toml(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "jarvis.toml"
+            config_path.write_text(
+                """
+[[mcp.servers]]
+name = "demo_mcp"
+command = "python"
+args = ["demo_server.py"]
+risk_level = "low"
+requires_approval = false
+
+[[mcp.servers.tools]]
+name = "echo"
+risk_level = "medium"
+requires_approval = true
+""".strip(),
+                encoding="utf-8",
+            )
+
+            settings = load_settings(config_path)
+
+        server = settings.mcp.servers[0]
+        self.assertEqual(len(server.tools), 1)
+        self.assertEqual(server.tools[0].name, "echo")
+        self.assertEqual(server.tools[0].risk_level, "medium")
+        self.assertTrue(server.tools[0].requires_approval)
+
     def test_loads_prompt_override_paths_from_toml(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -904,6 +933,36 @@ args = ["{server_path}"]
 
         self.assertTrue(result.success)
         self.assertEqual(result.output["text"], "demo echo: from registry")
+
+    def test_mcp_tool_policy_override_applies_to_registered_tool(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "jarvis.toml"
+            command = sys.executable.replace("\\", "/")
+            server_path = str(_demo_mcp_server_path()).replace("\\", "/")
+            config_path.write_text(
+                f"""
+[[mcp.servers]]
+name = "demo_mcp"
+command = "{command}"
+args = ["{server_path}"]
+risk_level = "low"
+requires_approval = false
+
+[[mcp.servers.tools]]
+name = "echo"
+risk_level = "medium"
+requires_approval = true
+""".strip(),
+                encoding="utf-8",
+            )
+            settings = load_settings(config_path)
+
+            registry = create_default_tool_registry(settings)
+            tool = registry.get("demo_mcp.echo")
+
+        self.assertEqual(tool.risk_level, "medium")
+        self.assertTrue(tool.requires_approval)
 
     def test_orchestrator_can_execute_validated_mcp_tool_plan(self) -> None:
         provider = StaticModelProvider(

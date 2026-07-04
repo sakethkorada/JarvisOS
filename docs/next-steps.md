@@ -22,6 +22,9 @@
 - Added a generic stdio MCP tool adapter and demo MCP server.
 - Added `general.generate_text` as a model-backed internal language capability.
 - Added minimal `$last.text` step data flow for generated text -> tool calls.
+- Split runtime code into orchestration, tools, models, integrations, and
+  storage packages while keeping compatibility imports.
+- Added per-tool MCP risk and approval overrides.
 
 Current model behavior:
 
@@ -53,12 +56,13 @@ Why this should come before LLM-driven planning:
 
 ## Recommended Next Steps
 
-1. Split the package into subdirectories after the generalist slice, starting
-   with the highest-pressure files such as models, tools, MCP, orchestration,
-   settings, and CLI.
-2. Try a real Google Calendar or Gmail MCP server as a configured MCP tool
-   source.
-3. Add risk/approval overrides per MCP tool, not only per MCP server.
+1. Choose the Google Workspace path:
+   local stdio MCP server now, or official Google Workspace HTTP/OAuth MCP
+   after adding HTTP transport support.
+2. Add HTTP MCP transport and OAuth handling if using Google's official
+   Workspace MCP servers directly.
+3. Try Google Calendar read-only tools first, especially listing calendars,
+   listing events, and getting one event.
 4. Add resume/apply behavior for approved external or high-risk tool execution
    items.
 5. Add trace filtering, timing, and basic metrics for benchmarking.

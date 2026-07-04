@@ -51,6 +51,8 @@ CLI command
 - `jarvis.toml` can set a default model and mode-specific model choices.
 - Local plugin folders can be loaded from configured plugin paths.
 - MCP server tools can be loaded from `[[mcp.servers]]` config entries.
+- MCP tools can override server-level risk and approval settings with
+  `[[mcp.servers.tools]]`.
 - `memory.search` uses a local SQLite-backed memory store.
 - `jarvis memory add/search/list` manage local memory records.
 - `task.create` writes low-risk local tasks to SQLite without approval.
@@ -74,6 +76,8 @@ CLI command
 - Tasks are local SQLite records, not synced to an external task app yet.
 - MCP support currently covers stdio tool discovery/calls. HTTP transports,
   resources, prompts, and long-lived sessions can come later.
+- Official Google Workspace MCP servers are HTTP/OAuth-based, so JarvisOS needs
+  HTTP MCP transport and OAuth handling before using them directly.
 - Deterministic synthesis is still simple, but it includes grounded lines from
   actual tool outputs and acts as the fallback path.
 - `general.generate_text` is the first model-backed internal language

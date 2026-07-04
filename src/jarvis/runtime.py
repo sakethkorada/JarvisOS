@@ -2,19 +2,19 @@
 
 from __future__ import annotations
 
-from jarvis.approvals import ApprovalStore
 from jarvis.agents import default_agent_registry
-from jarvis.memory import MemoryExtractor, MemoryStore
-from jarvis.mcp import load_mcp_tools
+from jarvis.integrations.mcp import load_mcp_tools
+from jarvis.integrations.plugins import load_plugins
 from jarvis.models import default_model_router
-from jarvis.orchestrator import Orchestrator
-from jarvis.plugins import load_plugins
+from jarvis.orchestration.orchestrator import Orchestrator
 from jarvis.policies import PolicyEngine
 from jarvis.prompts import PromptLibrary
 from jarvis.settings import JarvisSettings, load_settings
-from jarvis.tasks import TaskStore
+from jarvis.storage.approvals import ApprovalStore
+from jarvis.storage.memory import MemoryExtractor, MemoryStore
+from jarvis.storage.tasks import TaskStore
+from jarvis.storage.traces import TraceStore
 from jarvis.tools import ToolRegistry, default_tool_registry
-from jarvis.traces import TraceStore
 
 
 def create_default_orchestrator(settings: JarvisSettings | None = None) -> Orchestrator:

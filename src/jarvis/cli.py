@@ -8,10 +8,8 @@ from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
 
-from jarvis.approvals import apply_approved_record
 from jarvis.agents import default_agent_registry
 from jarvis.contracts import ApprovalRecord, MemoryRecord, TaskRecord
-from jarvis.memory import MemoryStore
 from jarvis.models import default_model_router
 from jarvis.runtime import (
     create_default_approval_store,
@@ -21,7 +19,9 @@ from jarvis.runtime import (
     create_default_trace_store,
 )
 from jarvis.settings import load_settings
-from jarvis.traces import TraceSummary
+from jarvis.storage.approvals import apply_approved_record
+from jarvis.storage.memory import MemoryStore
+from jarvis.storage.traces import TraceSummary
 
 
 def _json_default(value: Any) -> Any:
