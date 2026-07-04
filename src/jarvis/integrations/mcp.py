@@ -388,7 +388,7 @@ def _execute_mcp_tool(
         binding.auth_store,
         binding.oauth_manager,
     )
-    result = client.call_tool(binding.mcp_tool_name, arguments)
+    result = client.call_tool(binding.mcp_tool_name, _clean_mcp_arguments(arguments))
     return _normalize_mcp_result(result)
 
 
@@ -441,6 +441,30 @@ def _normalize_mcp_result(result: dict[str, Any]) -> dict[str, Any]:
         "mcp_result": result,
         "text": _content_to_text(content),
     }
+
+
+def _clean_mcp_arguments(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Remove null values that LLM planners may add to optional MCP arguments."""
+    cleaned = _remove_none_values(arguments)
+    if not isinstance(cleaned, dict):
+        return {}
+    return cleaned
+
+
+def _remove_none_values(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            key: cleaned
+            for key, item in value.items()
+            if (cleaned := _remove_none_values(item)) is not None
+        }
+    if isinstance(value, list):
+        return [
+            cleaned
+            for item in value
+            if (cleaned := _remove_none_values(item)) is not None
+        ]
+    return value
 
 
 def _content_to_text(content: Any) -> str:

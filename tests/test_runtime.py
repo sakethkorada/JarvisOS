@@ -1161,6 +1161,42 @@ url = "{server_url}"
             "http demo echo: from http registry",
         )
 
+    def test_http_mcp_tool_drops_null_arguments(self) -> None:
+        _HttpMcpHandler.last_arguments = None
+        with _http_mcp_server() as server_url:
+            with TemporaryDirectory() as temp_dir:
+                root = Path(temp_dir)
+                config_path = root / "jarvis.toml"
+                config_path.write_text(
+                    f"""
+[[mcp.servers]]
+name = "http_demo"
+transport = "http"
+url = "{server_url}"
+""".strip(),
+                    encoding="utf-8",
+                )
+                settings = load_settings(config_path)
+
+                registry = create_default_tool_registry(settings)
+                result = registry.execute(
+                    ToolCall(
+                        "http_demo.echo",
+                        {
+                            "text": "clean",
+                            "optional": None,
+                            "nested": {"drop": None, "keep": "value"},
+                        },
+                    )
+                )
+
+        self.assertTrue(result.success)
+        self.assertEqual(
+            _HttpMcpHandler.last_arguments,
+            {"text": "clean", "nested": {"keep": "value"}},
+        )
+
+
     def test_mcp_tool_is_registered_from_settings(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1490,6 +1526,7 @@ class _HttpMcpHandler(BaseHTTPRequestHandler):
 
     required_token = "test-access-token"
     require_token = False
+    last_arguments: dict[str, object] | None = None
 
     def do_POST(self) -> None:
         if self.path != "/mcp":
@@ -1555,6 +1592,7 @@ class _HttpMcpHandler(BaseHTTPRequestHandler):
             }
         if method == "tools/call":
             arguments = params.get("arguments", {})
+            type(self).last_arguments = arguments if isinstance(arguments, dict) else None
             text = ""
             if isinstance(arguments, dict):
                 text = str(arguments.get("text", ""))
