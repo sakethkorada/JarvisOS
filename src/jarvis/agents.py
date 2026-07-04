@@ -39,6 +39,13 @@ def default_agent_registry() -> AgentRegistry:
     )
     registry.register(
         AgentSpec(
+            name="general",
+            description="Generates and transforms text with the selected model.",
+            allowed_tools=("general.generate_text",),
+        )
+    )
+    registry.register(
+        AgentSpec(
             name="memory",
             description="Retrieves lightweight local context.",
             allowed_tools=("memory.search",),

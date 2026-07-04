@@ -10,6 +10,8 @@ from jarvis.contracts import (
     MemoryCandidate,
     PlanStep,
     RunResult,
+    ToolCall,
+    ToolExecutionContext,
     ToolResult,
     TraceEvent,
     new_id,
@@ -90,6 +92,33 @@ class Orchestrator:
         for step in plan.steps:
             agent = self._agents.get(step.agent_name)
             tool = self._tools.get(step.tool_call.tool_name)
+            resolved_arguments, resolution_error = _resolve_arguments(
+                step.tool_call.arguments,
+                tuple(results),
+            )
+            executable_step = replace(
+                step,
+                tool_call=ToolCall(step.tool_call.tool_name, resolved_arguments),
+            )
+
+            if resolution_error is not None:
+                result = ToolResult(
+                    tool_name=tool.name,
+                    output={},
+                    success=False,
+                    error=resolution_error,
+                )
+                results.append(result)
+                completed_steps.append(replace(executable_step, status="failed"))
+                status = "failed"
+                trace.append(
+                    TraceEvent(
+                        "argument_resolution.failed",
+                        resolution_error,
+                        data={"tool": tool.name, "arguments": step.tool_call.arguments},
+                    )
+                )
+                continue
 
             if "*" not in agent.allowed_tools and tool.name not in agent.allowed_tools:
                 result = ToolResult(
@@ -99,7 +128,7 @@ class Orchestrator:
                     error=f"{agent.name} is not allowed to use {tool.name}.",
                 )
                 results.append(result)
-                completed_steps.append(replace(step, status="failed"))
+                completed_steps.append(replace(executable_step, status="failed"))
                 status = "failed"
                 trace.append(TraceEvent("step.failed", result.error or "Step failed."))
                 continue
@@ -122,7 +151,7 @@ class Orchestrator:
                         reason=decision.reason,
                         payload={
                             "tool_name": tool.name,
-                            "arguments": step.tool_call.arguments,
+                            "arguments": executable_step.tool_call.arguments,
                             "risk_level": tool.risk_level,
                             "requires_approval": tool.requires_approval,
                         },
@@ -139,7 +168,9 @@ class Orchestrator:
                     error="Approval required.",
                 )
                 results.append(result)
-                completed_steps.append(replace(step, status="approval_required"))
+                completed_steps.append(
+                    replace(executable_step, status="approval_required")
+                )
                 status = "pending_approval"
                 trace.append(
                     TraceEvent(
@@ -150,15 +181,29 @@ class Orchestrator:
                 )
                 continue
 
-            result = self._tools.execute(step.tool_call)
+            execution_context = ToolExecutionContext(
+                goal=goal,
+                model_name=model_name,
+                model_mode=model_mode,
+                models=self._models,
+                prior_results=tuple(results),
+            )
+            result = self._tools.execute(
+                executable_step.tool_call,
+                context=execution_context,
+            )
             results.append(result)
             step_status = "completed" if result.success else "failed"
-            completed_steps.append(replace(step, status=step_status))
+            completed_steps.append(replace(executable_step, status=step_status))
             trace.append(
                 TraceEvent(
                     f"step.{step_status}",
-                    step.description,
-                    data={"tool": result.tool_name, "output": result.output},
+                    executable_step.description,
+                    data={
+                        "tool": result.tool_name,
+                        "arguments": executable_step.tool_call.arguments,
+                        "output": result.output,
+                    },
                 )
             )
             if not result.success:
@@ -275,3 +320,68 @@ class Orchestrator:
             )
             approval_ids.append(approval.id)
         return approval_ids
+
+
+def _resolve_arguments(
+    arguments: dict[str, object],
+    prior_results: tuple[ToolResult, ...],
+) -> tuple[dict[str, object], str | None]:
+    resolved: dict[str, object] = {}
+    for key, value in arguments.items():
+        resolved_value, error = _resolve_value(value, prior_results)
+        if error is not None:
+            return resolved, error
+        resolved[key] = resolved_value
+    return resolved, None
+
+
+def _resolve_value(
+    value: object,
+    prior_results: tuple[ToolResult, ...],
+) -> tuple[object, str | None]:
+    if isinstance(value, str):
+        return _resolve_string(value, prior_results)
+    if isinstance(value, list):
+        items: list[object] = []
+        for item in value:
+            resolved_item, error = _resolve_value(item, prior_results)
+            if error is not None:
+                return None, error
+            items.append(resolved_item)
+        return items, None
+    if isinstance(value, dict):
+        resolved_dict: dict[str, object] = {}
+        for key, item in value.items():
+            resolved_item, error = _resolve_value(item, prior_results)
+            if error is not None:
+                return None, error
+            resolved_dict[str(key)] = resolved_item
+        return resolved_dict, None
+    return value, None
+
+
+def _resolve_string(
+    value: str,
+    prior_results: tuple[ToolResult, ...],
+) -> tuple[object, str | None]:
+    if not value.startswith("$last."):
+        return value, None
+    field_name = value.removeprefix("$last.")
+    last_result = _last_successful_result(prior_results)
+    if last_result is None:
+        return None, f"Could not resolve {value}: no prior successful tool result."
+    if field_name not in last_result.output:
+        return (
+            None,
+            f"Could not resolve {value}: previous result has no '{field_name}' field.",
+        )
+    return last_result.output[field_name], None
+
+
+def _last_successful_result(
+    prior_results: tuple[ToolResult, ...],
+) -> ToolResult | None:
+    for result in reversed(prior_results):
+        if result.success:
+            return result
+    return None

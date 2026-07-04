@@ -13,6 +13,7 @@ CLI command
   -> bundled or user-configured planner prompt
   -> selected model provider for optional LLM planning
   -> deterministic plan validation or fallback
+  -> step argument reference resolution
   -> deterministic policy checks
   -> approval queue for blocked actions or memory candidates
   -> mock/local tool execution
@@ -33,6 +34,10 @@ CLI command
 - Planner and synthesis prompts load from bundled markdown files, with optional
   config overrides.
 - Configured MCP stdio servers can expose tools into the shared ToolRegistry.
+- `general.generate_text` can generate intermediate text with the selected
+  model before another tool uses it.
+- Plan steps can pass the previous successful tool result's `text` field with
+  `$last.text`.
 - The synthesis agent can use the selected model to write the final answer from
   confirmed tool results.
 - Synthesis falls back to deterministic grounded output if the model fails,
@@ -71,6 +76,10 @@ CLI command
   resources, prompts, and long-lived sessions can come later.
 - Deterministic synthesis is still simple, but it includes grounded lines from
   actual tool outputs and acts as the fallback path.
+- `general.generate_text` is the first model-backed internal language
+  capability. Specialist prompt/config layers can become richer later.
+- Step data flow only supports a minimal `$last.text` reference today. Richer
+  workflow variables, named outputs, and dependency graphs can come later.
 - Tool execution approvals can be recorded, but approved tool calls are not
   automatically resumed yet.
 - Online plugin acquisition is not implemented yet. Future online plugins should
@@ -97,6 +106,7 @@ python -m jarvis tasks complete <task_id> --config jarvis.toml.example
 python -m jarvis run "prepare me for my meeting tomorrow" --model "ollama/llama3.2:3b"
 python -m jarvis run "prepare me for my meeting tomorrow" --mode private
 python -m jarvis run "prepare me for my meeting tomorrow" --model "ollama/llama3.2:3b" --json
+python -m jarvis run "Generate a fun fact about JarvisOS and echo it with the demo MCP tool" --config <mcp-demo-config> --model "ollama/llama3.2:3b"
 python -m unittest discover -s tests
 ```
 

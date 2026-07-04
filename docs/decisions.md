@@ -210,3 +210,40 @@ MCP servers when good ones are available. JarvisOS should provide the client and
 policy/trace/orchestration layer instead of rebuilding every provider adapter
 by hand. Read-only MCP tools can be low-risk by default, while writes remain
 approval-controlled through configuration and policy.
+
+## 0021 - Keep Language Generation Separate From Provider Tools
+
+JarvisOS should add a generalist language capability before relying on real
+provider integrations for workflows that require drafting, rewriting, or
+intermediate text generation.
+
+Reason: provider tools should read or write provider state. They should not own
+the reasoning or drafting layer. For example, an email specialist or generalist
+LLM should compose an email body from context, then Gmail tooling should create
+the draft or send after approval. The same pattern applies to simple MCP demos:
+generate the text first, then pass it to an echo tool.
+
+## 0022 - Split Packages After Generalist Capability Lands
+
+The codebase should move from flat files into subpackages soon, but the next
+behavioral slice should land first.
+
+Reason: the generalist slice will clarify responsibility boundaries between
+language agents, deterministic tools, MCP adapters, orchestration, and config.
+Splitting immediately after that reduces churn and gives the new package layout
+real domain pressure instead of guessing too early.
+
+## 0023 - Add Generalist Text Generation Before Real Provider Writes
+
+JarvisOS now exposes `general.generate_text` as a low-risk internal capability
+that uses the selected model to generate intermediate text. Plan steps can pass
+the previous successful text output into another tool with `$last.text`.
+
+Reason: workflows such as drafting email, preparing agendas, or using MCP tools
+need JarvisOS to generate language before provider tools act. Provider tools
+should read or write provider state; the runtime's language agents should draft,
+rewrite, and summarize through the model router.
+
+Tradeoff: `$last.text` is intentionally small. It proves vertical data flow
+without introducing a full workflow variable system before real integrations
+create pressure for it.

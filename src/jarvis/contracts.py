@@ -80,6 +80,23 @@ ToolHandler = Callable[[dict[str, Any]], dict[str, Any]]
 
 
 @dataclass(frozen=True)
+class ToolExecutionContext:
+    """Runtime context available to model-backed internal tools."""
+
+    goal: str
+    model_name: str | None
+    model_mode: str
+    models: Any
+    prior_results: tuple["ToolResult", ...] = ()
+
+
+ContextToolHandler = Callable[
+    [dict[str, Any], ToolExecutionContext],
+    dict[str, Any],
+]
+
+
+@dataclass(frozen=True)
 class ToolCall:
     """A request to execute a named tool with arguments."""
 

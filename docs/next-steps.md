@@ -20,6 +20,8 @@
 - Added `tasks show/complete` and simple task-title cleanup.
 - Added deterministic duplicate prevention for approved memory writes.
 - Added a generic stdio MCP tool adapter and demo MCP server.
+- Added `general.generate_text` as a model-backed internal language capability.
+- Added minimal `$last.text` step data flow for generated text -> tool calls.
 
 Current model behavior:
 
@@ -51,7 +53,9 @@ Why this should come before LLM-driven planning:
 
 ## Recommended Next Steps
 
-1. Polish the canonical local POC with Ollama as the default non-fake path.
+1. Split the package into subdirectories after the generalist slice, starting
+   with the highest-pressure files such as models, tools, MCP, orchestration,
+   settings, and CLI.
 2. Try a real Google Calendar or Gmail MCP server as a configured MCP tool
    source.
 3. Add risk/approval overrides per MCP tool, not only per MCP server.
@@ -61,4 +65,26 @@ Why this should come before LLM-driven planning:
 6. Expand plugin support with enable/disable state and clearer validation errors.
 7. Add richer agent config files for specialists once prompt-only overrides feel
    too narrow.
-8. Add online plugin acquisition later as a separate installer layer.
+8. Add named step outputs or richer workflow variables once `$last.text` becomes
+   too narrow.
+9. Add online plugin acquisition later as a separate installer layer.
+
+## Near-Term Design Notes
+
+Language generation should be an agent capability, not a provider tool
+responsibility. For example, Gmail should send or draft an email, but an LLM
+generalist or email specialist should compose the body from context first.
+
+The intended pattern is:
+
+```text
+LLM agent generates or transforms language
+  -> deterministic/read-write tool acts on external or local systems
+  -> policy controls side effects
+  -> trace records the confirmed result
+```
+
+This matters for MCP integrations. A demo echo server should only echo text; it
+should not invent a fun fact. A Gmail MCP server should send or create drafts;
+it should not own JarvisOS' drafting policy. JarvisOS should orchestrate those
+steps explicitly.

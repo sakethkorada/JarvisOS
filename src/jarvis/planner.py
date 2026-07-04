@@ -120,14 +120,39 @@ class Planner:
                 )
             )
 
+        should_generate_text = any(
+            phrase in normalized
+            for phrase in (
+                "generate",
+                "draft",
+                "compose",
+                "rewrite",
+                "write",
+                "fun fact",
+            )
+        )
+        if should_generate_text and self._tools.has("general.generate_text"):
+            steps.append(
+                PlanStep(
+                    id=new_id("step"),
+                    agent_name="general",
+                    tool_call=ToolCall(
+                        "general.generate_text",
+                        {"instruction": goal},
+                    ),
+                    description="Generate requested text.",
+                )
+            )
+
         if "echo" in normalized:
             echo_tool = _first_matching_tool(self._tools, suffix=".echo")
             if echo_tool is not None:
+                echo_text = "$last.text" if should_generate_text else goal
                 steps.append(
                     PlanStep(
                         id=new_id("step"),
                         agent_name="plugin",
-                        tool_call=ToolCall(echo_tool, {"text": goal}),
+                        tool_call=ToolCall(echo_tool, {"text": echo_text}),
                         description="Call configured echo tool.",
                     )
                 )
@@ -216,6 +241,8 @@ def _strip_code_fence(text: str) -> str:
 
 
 def _agent_for_tool(tool_name: str) -> str:
+    if tool_name.startswith("general."):
+        return "general"
     if tool_name.startswith("memory."):
         return "memory"
     if tool_name.startswith("calendar."):
@@ -247,6 +274,8 @@ def _normalize_arguments(
         normalized.setdefault("goal", goal)
     if tool_name == "task.create":
         normalized.setdefault("title", goal)
+    if tool_name == "general.generate_text":
+        normalized.setdefault("instruction", goal)
     if tool_name.endswith(".echo"):
         normalized.setdefault("text", goal)
     return normalized

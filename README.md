@@ -86,6 +86,12 @@ After tool execution, the synthesis agent asks the selected model to write the
 final response from confirmed tool results. If model synthesis fails or makes an
 obvious unsupported claim, JarvisOS falls back to deterministic grounded output.
 
+`general.generate_text` is the first internal language capability. The planner
+can use it to generate intermediate text, then pass that text into a following
+tool with `$last.text`. This keeps drafting and language generation in the
+model layer while provider tools such as MCP servers perform their concrete
+actions.
+
 Planner and synthesis prompts are loaded from bundled prompt files by default.
 Users can override them from config without editing Python code.
 
@@ -155,6 +161,13 @@ python -m jarvis traces list --config jarvis.toml.example
 Use `--model fake-local` for deterministic smoke checks. Use Ollama for the
 LLM planner and synthesis path.
 
+To prove model-generated text flowing into a tool, configure the demo MCP server
+from the MCP section below and run:
+
+```powershell
+python -m jarvis run "Generate a fun fact about JarvisOS and echo it with the demo MCP tool" --config path\to\mcp-demo.toml --model "ollama/llama3.2:3b"
+```
+
 ### Traces
 
 Every `jarvis run` stores a trace when `[traces].enabled = true`.
@@ -176,7 +189,8 @@ Traces are useful for debugging, benchmarking, comparing model/tool behavior,
 and understanding exactly what happened during a run.
 
 Trace events include planning, policy checks, tool execution, synthesis source,
-and structured model-provider errors when fallbacks are used.
+resolved tool arguments, and structured model-provider errors when fallbacks
+are used.
 
 ### Memory
 
@@ -336,7 +350,12 @@ Try the demo server:
 $env:PYTHONPATH="src"
 python -m jarvis tools --config path\to\mcp-demo.toml
 python -m jarvis run "call demo mcp echo" --config path\to\mcp-demo.toml --model fake-local
+python -m jarvis run "Generate a fun fact about JarvisOS and echo it with the demo MCP tool" --config path\to\mcp-demo.toml --model "ollama/llama3.2:3b"
 ```
+
+The echo server only echoes input. If the run produces a new fun fact or draft,
+that text came from `general.generate_text`; the MCP tool then acted on the
+generated text.
 
 ## Local Memory
 

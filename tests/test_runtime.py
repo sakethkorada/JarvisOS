@@ -4,7 +4,7 @@ from tempfile import TemporaryDirectory
 import sys
 
 from jarvis.approvals import ApprovalStore, apply_approved_record
-from jarvis.contracts import ToolCall
+from jarvis.contracts import ToolCall, ToolExecutionContext
 from jarvis.contracts import ModelRequest, ModelResponse
 from jarvis.errors import ModelProviderError
 from jarvis.memory import MemoryExtractor, MemoryStore
@@ -662,6 +662,84 @@ class PlannerTests(unittest.TestCase):
             "summarize Jordan notes",
         )
 
+    def test_llm_plan_accepts_general_generate_text(self) -> None:
+        provider = StaticModelProvider(
+            """
+{
+  "steps": [
+    {
+      "tool_name": "general.generate_text",
+      "arguments": {"instruction": "Draft a short update."},
+      "description": "Draft update text."
+    }
+  ]
+}
+""".strip()
+        )
+        with TemporaryDirectory() as temp_dir:
+            planner = Planner(
+                default_agent_registry(),
+                default_tool_registry(MemoryStore(Path(temp_dir) / "memory.sqlite3")),
+                ModelRouter(
+                    {provider.name: provider},
+                    default_provider_name=provider.name,
+                ),
+                PromptLibrary().planner_prompt(),
+            )
+
+            plan, source, _ = planner.create_plan(
+                "draft an update",
+                model_name=provider.name,
+                model_mode="balanced",
+            )
+
+        self.assertEqual(source, "llm")
+        self.assertEqual(plan.steps[0].agent_name, "general")
+        self.assertEqual(plan.steps[0].tool_call.tool_name, "general.generate_text")
+
+
+class GeneralToolTests(unittest.TestCase):
+    """Tests for model-backed general language generation."""
+
+    def test_general_generate_text_uses_selected_model(self) -> None:
+        provider = StaticModelProvider("Generated body.")
+        registry = default_tool_registry()
+        context = ToolExecutionContext(
+            goal="draft a note",
+            model_name=provider.name,
+            model_mode="balanced",
+            models=ModelRouter({provider.name: provider}, provider.name),
+        )
+
+        result = registry.execute(
+            ToolCall("general.generate_text", {"instruction": "Draft a note."}),
+            context=context,
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.output["text"], "Generated body.")
+        self.assertEqual(result.output["model"], provider.name)
+
+    def test_general_generate_text_fake_local_is_deterministic(self) -> None:
+        registry = default_tool_registry()
+        context = ToolExecutionContext(
+            goal="generate a fun fact",
+            model_name="fake-local",
+            model_mode="balanced",
+            models=ModelRouter({}),
+        )
+
+        result = registry.execute(
+            ToolCall("general.generate_text", {"instruction": "Generate a fun fact."}),
+            context=context,
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(
+            result.output["text"],
+            "Generated text for: Generate a fun fact.",
+        )
+
 
 class SynthesisTests(unittest.TestCase):
     """Tests for final response synthesis and fallback behavior."""
@@ -878,6 +956,103 @@ args = ["{server_path}"]
             "demo echo: orchestrated",
         )
 
+    def test_orchestrator_passes_generated_text_to_mcp_tool(self) -> None:
+        provider = SequencedModelProvider(
+            [
+                """
+{
+  "steps": [
+    {
+      "tool_name": "general.generate_text",
+      "arguments": {"instruction": "Generate one short JarvisOS fact."},
+      "description": "Generate text."
+    },
+    {
+      "tool_name": "demo_mcp.echo",
+      "arguments": {"text": "$last.text"},
+      "description": "Echo generated text."
+    }
+  ]
+}
+""".strip(),
+                "JarvisOS coordinates local tools.",
+                "Echoed result: demo echo: JarvisOS coordinates local tools.",
+            ]
+        )
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "jarvis.toml"
+            command = sys.executable.replace("\\", "/")
+            server_path = str(_demo_mcp_server_path()).replace("\\", "/")
+            config_path.write_text(
+                f"""
+[[mcp.servers]]
+name = "demo_mcp"
+command = "{command}"
+args = ["{server_path}"]
+""".strip(),
+                encoding="utf-8",
+            )
+            settings = load_settings(config_path)
+            tools = create_default_tool_registry(settings)
+            from jarvis.orchestrator import Orchestrator
+            from jarvis.policies import PolicyEngine
+
+            orchestrator = Orchestrator(
+                agents=default_agent_registry(),
+                tools=tools,
+                models=ModelRouter({provider.name: provider}, provider.name),
+                policies=PolicyEngine(),
+                planner_prompt=PromptLibrary().planner_prompt(),
+                synthesis_prompt=PromptLibrary().synthesis_prompt(),
+            )
+
+            result = orchestrator.run(
+                "generate a JarvisOS fact and echo it",
+                provider.name,
+            )
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(result.step_results[0].tool_name, "general.generate_text")
+        self.assertEqual(
+            result.step_results[1].output["text"],
+            "demo echo: JarvisOS coordinates local tools.",
+        )
+        self.assertEqual(
+            result.plan.steps[1].tool_call.arguments["text"],
+            "JarvisOS coordinates local tools.",
+        )
+        self.assertIn(
+            "demo echo: JarvisOS coordinates local tools.",
+            result.final_response,
+        )
+
+    def test_last_text_reference_fails_without_prior_result(self) -> None:
+        provider = FailingAfterFirstModelProvider(
+            """
+{
+  "steps": [
+    {
+      "tool_name": "task.create_summary",
+      "arguments": {"goal": "$last.text"},
+      "description": "Summarize generated text."
+    }
+  ]
+}
+""".strip()
+        )
+        with TemporaryDirectory() as temp_dir:
+            memory_store = MemoryStore(Path(temp_dir) / "memory.sqlite3")
+            orchestrator = _orchestrator_with_provider(provider, memory_store)
+
+            result = orchestrator.run("summarize previous generated text", provider.name)
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.step_results[0].tool_name, "task.create_summary")
+        self.assertIn("$last.text", result.step_results[0].error or "")
+        trace_types = [event.event_type for event in result.trace]
+        self.assertIn("argument_resolution.failed", trace_types)
+
     def test_fake_local_fallback_can_execute_mcp_echo_tool(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -903,6 +1078,37 @@ args = ["{server_path}"]
         tool_names = [item.tool_name for item in result.step_results]
         self.assertIn("demo_mcp.echo", tool_names)
         self.assertIn("demo echo: echo hello from mcp", result.final_response)
+
+    def test_fake_local_fallback_generates_text_before_mcp_echo(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "jarvis.toml"
+            command = sys.executable.replace("\\", "/")
+            server_path = str(_demo_mcp_server_path()).replace("\\", "/")
+            config_path.write_text(
+                f"""
+[[mcp.servers]]
+name = "demo_mcp"
+command = "{command}"
+args = ["{server_path}"]
+""".strip(),
+                encoding="utf-8",
+            )
+            settings = load_settings(config_path)
+
+            result = create_default_orchestrator(settings).run(
+                "Generate a fun fact about JarvisOS and echo it",
+                model_name="fake-local",
+            )
+
+        tool_names = [item.tool_name for item in result.step_results]
+        self.assertIn("general.generate_text", tool_names)
+        self.assertIn("demo_mcp.echo", tool_names)
+        self.assertIn(
+            "demo echo: Generated text for: Generate a fun fact about JarvisOS "
+            "and echo it",
+            result.final_response,
+        )
 
 
 def _write_notes_plugin(root: Path) -> Path:

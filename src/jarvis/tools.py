@@ -5,7 +5,16 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from jarvis.contracts import AvailableTool, ToolCall, ToolHandler, ToolResult, ToolSpec
+from jarvis.contracts import (
+    AvailableTool,
+    ContextToolHandler,
+    ModelRequest,
+    ToolCall,
+    ToolExecutionContext,
+    ToolHandler,
+    ToolResult,
+    ToolSpec,
+)
 from jarvis.memory import MemoryStore
 from jarvis.tasks import TaskStore
 
@@ -16,11 +25,23 @@ class ToolRegistry:
     def __init__(self) -> None:
         self._specs: dict[str, ToolSpec] = {}
         self._handlers: dict[str, ToolHandler] = {}
+        self._context_handlers: dict[str, ContextToolHandler] = {}
 
     def register(self, spec: ToolSpec, handler: ToolHandler) -> None:
         """Register or replace a tool and its handler."""
         self._specs[spec.name] = spec
         self._handlers[spec.name] = handler
+        self._context_handlers.pop(spec.name, None)
+
+    def register_contextual(
+        self,
+        spec: ToolSpec,
+        handler: ContextToolHandler,
+    ) -> None:
+        """Register a tool handler that needs runtime execution context."""
+        self._specs[spec.name] = spec
+        self._context_handlers[spec.name] = handler
+        self._handlers.pop(spec.name, None)
 
     def get(self, name: str) -> ToolSpec:
         """Return a tool specification by name."""
@@ -33,12 +54,21 @@ class ToolRegistry:
         """Return whether a tool is registered."""
         return name in self._specs
 
-    def execute(self, call: ToolCall) -> ToolResult:
+    def execute(
+        self,
+        call: ToolCall,
+        context: ToolExecutionContext | None = None,
+    ) -> ToolResult:
         """Execute a registered tool call and normalize failures."""
         spec = self.get(call.tool_name)
-        handler = self._handlers[spec.name]
         try:
-            return ToolResult(tool_name=spec.name, output=handler(call.arguments))
+            if spec.name in self._context_handlers:
+                if context is None:
+                    raise ValueError(f"{spec.name} requires execution context.")
+                output = self._context_handlers[spec.name](call.arguments, context)
+            else:
+                output = self._handlers[spec.name](call.arguments)
+            return ToolResult(tool_name=spec.name, output=output)
         except Exception as exc:  # pragma: no cover - defensive boundary
             return ToolResult(
                 tool_name=spec.name,
@@ -83,6 +113,45 @@ def _task_create_summary(arguments: dict[str, Any]) -> dict[str, Any]:
     return {
         "summary": f"Prepared a lightweight response for: {goal}",
         "pending_approvals": [],
+    }
+
+
+def _general_generate_text(
+    arguments: dict[str, Any],
+    context: ToolExecutionContext,
+) -> dict[str, Any]:
+    instruction = str(arguments.get("instruction") or context.goal).strip()
+    extra_context = str(arguments.get("context", "")).strip()
+    if not instruction:
+        raise ValueError("Instruction is required.")
+    if context.model_name == "fake-local":
+        return {
+            "text": f"Generated text for: {instruction}",
+            "model": "fake-local",
+        }
+
+    messages = [
+        f"User goal: {context.goal}",
+        "Generate only the requested text. Do not explain the plan.",
+    ]
+    if extra_context:
+        messages.append(f"Additional context: {extra_context}")
+    request = ModelRequest(
+        goal=instruction,
+        messages=messages,
+        mode=context.model_mode,
+        system_prompt=(
+            "You are the JarvisOS generalist language agent. Produce concise, "
+            "useful text for the requested task using only the given context."
+        ),
+    )
+    response = context.models.run(request, context.model_name)
+    text = response.text.strip()
+    if not text:
+        raise ValueError("Model returned empty generated text.")
+    return {
+        "text": text,
+        "model": response.model_name,
     }
 
 
@@ -207,6 +276,13 @@ def default_tool_registry(
             description="Create a lightweight response from gathered context.",
         ),
         _task_create_summary,
+    )
+    registry.register_contextual(
+        ToolSpec(
+            name="general.generate_text",
+            description="Generate or transform text with the selected model.",
+        ),
+        _general_generate_text,
     )
     if task_store is not None:
         registry.register(
