@@ -16,7 +16,17 @@ models = ["llama3.2:3b"]
 # a future installer. Runtime loading treats both the same after they are local.
 paths = ["examples/plugins/demo_notes"]
 
+[prompts]
+# Omit these to use bundled defaults from src/jarvis/prompts/.
+# Paths are resolved relative to this config file when they are not absolute.
+# planner = "prompts/planner.md"
+# synthesis = "prompts/synthesis.md"
+
 [memory]
 database_path = ".jarvis/memory.sqlite3"
 auto_extract = true
 auto_write = false
+
+[traces]
+database_path = ".jarvis/traces.sqlite3"
+enabled = true

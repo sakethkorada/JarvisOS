@@ -9,6 +9,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from jarvis.contracts import ModelRequest, ModelResponse
+from jarvis.errors import JarvisError, ModelProviderError
 from jarvis.settings import JarvisSettings, load_settings
 
 
@@ -50,14 +51,18 @@ class OllamaProvider(ModelProvider):
 
     def generate(self, request: ModelRequest) -> ModelResponse:
         """Send a chat request to Ollama and return normalized text."""
+        system_prompt = request.system_prompt or (
+            "You are a concise planning assistant inside JarvisOS."
+        )
+        user_content = "\n\n".join([*request.messages, request.goal])
         payload = {
             "model": self.model,
             "messages": [
                 {
                     "role": "system",
-                    "content": "You are a concise planning assistant inside JarvisOS.",
+                    "content": system_prompt,
                 },
-                {"role": "user", "content": request.goal},
+                {"role": "user", "content": user_content},
             ],
             "stream": False,
         }
@@ -105,7 +110,15 @@ class ModelRouter:
                 f"Unknown model provider: {selected_provider_name}. "
                 f"Available providers: {available}"
             ) from exc
-        return provider.generate(request)
+        try:
+            return provider.generate(request)
+        except JarvisError:
+            raise
+        except Exception as exc:
+            raise ModelProviderError(
+                str(exc),
+                component=selected_provider_name,
+            ) from exc
 
 
 def default_model_router(settings: JarvisSettings | None = None) -> ModelRouter:
@@ -127,7 +140,11 @@ def default_model_router(settings: JarvisSettings | None = None) -> ModelRouter:
     return ModelRouter(providers, default_provider_name=settings.models.default)
 
 
-def _post_json(url: str, payload: dict[str, Any], timeout_seconds: float) -> dict[str, Any]:
+def _post_json(
+    url: str,
+    payload: dict[str, Any],
+    timeout_seconds: float,
+) -> dict[str, Any]:
     """Post a JSON payload using the standard library HTTP client."""
     data = json.dumps(payload).encode("utf-8")
     request = Request(

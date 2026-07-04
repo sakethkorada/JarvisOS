@@ -52,6 +52,22 @@ class MemorySettings:
 
 
 @dataclass(frozen=True)
+class TraceSettings:
+    """Trace persistence settings."""
+
+    database_path: Path = Path(".jarvis/traces.sqlite3")
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
+class PromptSettings:
+    """Optional prompt override paths for configurable agent behavior."""
+
+    planner_path: Path | None = None
+    synthesis_path: Path | None = None
+
+
+@dataclass(frozen=True)
 class JarvisSettings:
     """Resolved application settings from config files and environment."""
 
@@ -59,6 +75,8 @@ class JarvisSettings:
     providers: ProviderSettings = field(default_factory=ProviderSettings)
     plugins: PluginSettings = field(default_factory=PluginSettings)
     memory: MemorySettings = field(default_factory=MemorySettings)
+    traces: TraceSettings = field(default_factory=TraceSettings)
+    prompts: PromptSettings = field(default_factory=PromptSettings)
     loaded_from: Path | None = None
 
     def resolve_model(
@@ -103,6 +121,8 @@ def _settings_from_data(
     ollama_data = _table(provider_data, "ollama")
     plugin_data = _table(data, "plugins")
     memory_data = _table(data, "memory")
+    trace_data = _table(data, "traces")
+    prompt_data = _table(data, "prompts")
 
     modes = _string_map(_table(model_data, "modes"))
     default_model = _optional_string(model_data.get("default"))
@@ -118,6 +138,13 @@ def _settings_from_data(
     )
     auto_extract = _optional_bool(memory_data.get("auto_extract"), default=True)
     auto_write = _optional_bool(memory_data.get("auto_write"), default=False)
+    trace_database_path = _resolve_config_path(
+        _optional_string(trace_data.get("database_path")) or ".jarvis/traces.sqlite3",
+        loaded_from,
+    )
+    traces_enabled = _optional_bool(trace_data.get("enabled"), default=True)
+    planner_prompt_path = _optional_path(prompt_data.get("planner"), loaded_from)
+    synthesis_prompt_path = _optional_path(prompt_data.get("synthesis"), loaded_from)
 
     return JarvisSettings(
         models=ModelSettings(default=default_model, modes=modes),
@@ -130,6 +157,14 @@ def _settings_from_data(
             database_path=memory_database_path,
             auto_extract=auto_extract,
             auto_write=auto_write,
+        ),
+        traces=TraceSettings(
+            database_path=trace_database_path,
+            enabled=traces_enabled,
+        ),
+        prompts=PromptSettings(
+            planner_path=planner_prompt_path,
+            synthesis_path=synthesis_prompt_path,
         ),
         loaded_from=loaded_from,
     )
@@ -157,6 +192,8 @@ def _settings_with_environment(settings: JarvisSettings) -> JarvisSettings:
         ),
         plugins=settings.plugins,
         memory=settings.memory,
+        traces=settings.traces,
+        prompts=settings.prompts,
         loaded_from=settings.loaded_from,
     )
 
@@ -167,6 +204,13 @@ def _resolve_config_path(path: str, loaded_from: Path | None) -> Path:
     if plugin_path.is_absolute() or loaded_from is None:
         return plugin_path
     return loaded_from.parent / plugin_path
+
+
+def _optional_path(value: Any, loaded_from: Path | None) -> Path | None:
+    path = _optional_string(value)
+    if path is None:
+        return None
+    return _resolve_config_path(path, loaded_from)
 
 
 def _table(data: dict[str, Any], key: str) -> dict[str, Any]:

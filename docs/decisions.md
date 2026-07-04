@@ -111,3 +111,50 @@ memory.
 Reason: the runtime needs a real memory substrate before smarter memory
 behavior, but personal memory should remain conservative until approval and
 review flows are stronger.
+
+## 0011 - Persist Run Traces Locally
+
+JarvisOS stores run summaries and ordered trace events in SQLite when tracing is
+enabled.
+
+Reason: trace persistence gives the project a durable debugging and benchmarking
+substrate. It allows later tools to inspect model choices, tool calls, failures,
+latency, and run behavior without requiring the user to save `--json` output
+manually.
+
+## 0012 - Validate LLM Plans Before Execution
+
+JarvisOS can ask a non-fake model for a JSON execution plan, but the runtime
+validates every step before execution.
+
+Reason: model output is useful for flexible planning, but tool names, agent
+permissions, and policy checks must remain deterministic. Invalid plans fall
+back to the safe deterministic planner.
+
+## 0013 - Use a Synthesis Agent With Deterministic Fallback
+
+Final responses are produced by a synthesis agent after tool execution. The
+agent can use the selected model, but it receives only the validated plan and
+confirmed tool results.
+
+Reason: language models are useful for writing a clear final answer, but they
+must not decide what happened. Empty, failed, or obviously unsupported synthesis
+falls back to deterministic grounded output.
+
+## 0014 - Normalize Provider Errors at Runtime Boundaries
+
+Model provider failures are wrapped in `ModelProviderError` before the runtime
+decides whether to fall back or record an error trace.
+
+Reason: MCP servers, APIs, plugins, and model providers will fail in different
+ways. A small shared error shape gives traces and user-facing diagnostics a
+common language without building a large exception framework too early.
+
+## 0015 - Move Core Agent Prompts Out of Code
+
+Planner and synthesis prompts now live in bundled markdown files, with optional
+config override paths under `[prompts]`.
+
+Reason: prompts are part of runtime behavior and should be editable without
+modifying Python code. Bundled defaults keep first-run setup simple, while
+override paths give users and developers a clean customization seam.

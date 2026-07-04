@@ -65,6 +65,8 @@ python -m jarvis run "prepare me for my meeting tomorrow" --model fake-local
 python -m jarvis run "prepare me for my meeting tomorrow" --model "ollama/llama3.2:3b"
 python -m jarvis run "prepare me for my meeting tomorrow" --mode private
 python -m jarvis run "find notes about Jordan" --config jarvis.toml.example
+python -m jarvis run "Prepare me for my meeting with Jordan tomorrow" --config jarvis.toml.example --model fake-local
+python -m jarvis run "find notes about Jordan and summarize what you know" --config jarvis.toml.example --model "ollama/llama3.2:3b"
 ```
 
 Options:
@@ -74,6 +76,18 @@ Options:
 - `--model` manually selects a model provider for this run.
 - `--mode` resolves a model from `[models.modes]` in settings.
 - `--config` loads a specific settings file.
+
+When a real model such as Ollama is selected, JarvisOS asks the model for a JSON
+tool plan, validates it against registered tools and agent permissions, then
+executes the validated plan. If the model returns invalid JSON or unknown tools,
+JarvisOS falls back to a deterministic safe plan.
+
+After tool execution, the synthesis agent asks the selected model to write the
+final response from confirmed tool results. If model synthesis fails or makes an
+obvious unsupported claim, JarvisOS falls back to deterministic grounded output.
+
+Planner and synthesis prompts are loaded from bundled prompt files by default.
+Users can override them from config without editing Python code.
 
 Model selection precedence:
 
@@ -94,6 +108,29 @@ python -m jarvis models
 python -m jarvis settings
 python -m jarvis settings --config jarvis.toml.example
 ```
+
+### Traces
+
+Every `jarvis run` stores a trace when `[traces].enabled = true`.
+
+```powershell
+python -m jarvis run "prepare me for my meeting tomorrow" --config jarvis.toml.example --model fake-local
+python -m jarvis traces list --config jarvis.toml.example
+python -m jarvis traces show <run_id> --config jarvis.toml.example
+python -m jarvis traces show <run_id> --config jarvis.toml.example --json
+```
+
+Trace options:
+
+- `traces list --limit N` controls how many recent runs are printed.
+- `traces show <run_id>` prints a readable event timeline.
+- `traces show <run_id> --json` prints the stored run and events as JSON.
+
+Traces are useful for debugging, benchmarking, comparing model/tool behavior,
+and understanding exactly what happened during a run.
+
+Trace events include planning, policy checks, tool execution, synthesis source,
+and structured model-provider errors when fallbacks are used.
 
 ### Memory
 
@@ -170,6 +207,25 @@ CLI --model
 `jarvis.toml` can point at local providers now and cloud providers later without
 changing orchestrator code.
 
+## Prompt Settings
+
+JarvisOS ships bundled prompt files for planning and final synthesis:
+
+```text
+src/jarvis/prompts/planner.md
+src/jarvis/prompts/synthesis.md
+```
+
+To customize them, point `[prompts]` at your own files:
+
+```toml
+[prompts]
+planner = "prompts/planner.md"
+synthesis = "prompts/synthesis.md"
+```
+
+Relative prompt paths are resolved from the config file location.
+
 ## Local Plugins
 
 JarvisOS loads local plugin folders declared in `jarvis.toml`. Online plugin
@@ -228,4 +284,8 @@ Configure the database path in `jarvis.toml`:
 database_path = ".jarvis/memory.sqlite3"
 auto_extract = true
 auto_write = false
+
+[traces]
+database_path = ".jarvis/traces.sqlite3"
+enabled = true
 ```

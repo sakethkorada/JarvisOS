@@ -58,4 +58,11 @@ def default_agent_registry() -> AgentRegistry:
             allowed_tools=("*",),
         )
     )
+    registry.register(
+        AgentSpec(
+            name="synthesis",
+            description="Writes the final answer from confirmed tool results.",
+            allowed_tools=(),
+        )
+    )
     return registry

@@ -6,18 +6,17 @@ from dataclasses import replace
 
 from jarvis.agents import AgentRegistry
 from jarvis.contracts import (
-    ExecutionPlan,
-    ModelRequest,
     PlanStep,
     RunResult,
-    ToolCall,
     ToolResult,
     TraceEvent,
     new_id,
 )
 from jarvis.memory import MemoryExtractor
 from jarvis.models import ModelRouter
+from jarvis.planner import Planner
 from jarvis.policies import PolicyEngine
+from jarvis.synthesizer import Synthesizer
 from jarvis.tools import ToolRegistry
 
 
@@ -30,6 +29,8 @@ class Orchestrator:
         tools: ToolRegistry,
         models: ModelRouter,
         policies: PolicyEngine,
+        planner_prompt: str,
+        synthesis_prompt: str,
         memory_extractor: MemoryExtractor | None = None,
         auto_write_memory: bool = False,
     ) -> None:
@@ -39,6 +40,8 @@ class Orchestrator:
         self._policies = policies
         self._memory_extractor = memory_extractor
         self._auto_write_memory = auto_write_memory
+        self._planner = Planner(agents, tools, models, planner_prompt)
+        self._synthesizer = Synthesizer(models, synthesis_prompt)
 
     def run(
         self,
@@ -52,19 +55,22 @@ class Orchestrator:
             TraceEvent("run.started", "Run started.", data={"goal": goal}),
         ]
 
-        model_response = self._models.run(
-            ModelRequest(goal=goal, mode=model_mode),
+        plan, plan_source, raw_planner_output = self._planner.create_plan(
+            goal,
             model_name,
+            model_mode,
         )
         trace.append(
             TraceEvent(
-                "model.selected",
-                f"Using model provider {model_response.model_name}.",
-                data={"model_response": model_response.text},
+                "planner.selected",
+                f"Created plan with {plan_source} planner.",
+                data={
+                    "model": model_name or "default",
+                    "source": plan_source,
+                    "raw_planner_output": raw_planner_output,
+                },
             )
         )
-
-        plan = self._create_plan(goal)
         trace.append(
             TraceEvent(
                 "plan.created",
@@ -136,7 +142,37 @@ class Orchestrator:
                 status = "failed"
 
         final_plan = replace(plan, steps=tuple(completed_steps))
-        final_response = self._summarize(goal, results, status)
+        synthesis_agent = self._agents.get("synthesis")
+        trace.append(
+            TraceEvent(
+                "synthesis.started",
+                f"{synthesis_agent.name} agent is preparing the final response.",
+                data={"agent": synthesis_agent.name},
+            )
+        )
+        synthesis = self._synthesizer.synthesize(
+            goal=goal,
+            plan=final_plan,
+            results=tuple(results),
+            status=status,
+            model_name=model_name,
+            model_mode=model_mode,
+        )
+        synthesis_data = {
+            "agent": synthesis_agent.name,
+            "source": synthesis.source,
+            "model": synthesis.model_name,
+        }
+        if synthesis.error is not None:
+            synthesis_data["error"] = synthesis.error.to_trace_data()
+        trace.append(
+            TraceEvent(
+                "synthesis.completed",
+                f"Final response created with {synthesis.source} synthesis.",
+                data=synthesis_data,
+            )
+        )
+        final_response = synthesis.text
         memory_candidates = self._suggest_memory(goal, final_response)
         if memory_candidates:
             trace.append(
@@ -179,80 +215,6 @@ class Orchestrator:
             final_response=final_response,
             status=status,
         )
-
-    def _create_plan(self, goal: str) -> ExecutionPlan:
-        """Create a minimal plan using currently registered demo capabilities."""
-        normalized = goal.lower()
-        steps: list[PlanStep] = [
-            PlanStep(
-                id=new_id("step"),
-                agent_name="memory",
-                tool_call=ToolCall("memory.search", {"query": goal}),
-                description="Search memory for relevant context.",
-            )
-        ]
-
-        if any(word in normalized for word in ("meeting", "calendar", "schedule")):
-            steps.append(
-                PlanStep(
-                    id=new_id("step"),
-                    agent_name="calendar",
-                    tool_call=ToolCall("calendar.search_events", {"query": goal}),
-                    description="Check calendar context.",
-                )
-            )
-
-        if "note" in normalized and self._tools.has("notes.search"):
-            steps.append(
-                PlanStep(
-                    id=new_id("step"),
-                    agent_name="plugin",
-                    tool_call=ToolCall("notes.search", {"query": goal}),
-                    description="Search configured notes plugin.",
-                )
-            )
-
-        steps.append(
-            PlanStep(
-                id=new_id("step"),
-                agent_name="orchestrator",
-                tool_call=ToolCall("task.breakdown", {"goal": goal}),
-                description="Create a simple task breakdown.",
-            )
-        )
-        steps.append(
-            PlanStep(
-                id=new_id("step"),
-                agent_name="orchestrator",
-                tool_call=ToolCall("task.create_summary", {"goal": goal}),
-                description="Create the final lightweight summary.",
-            )
-        )
-        return ExecutionPlan(goal=goal, steps=tuple(steps))
-
-    def _summarize(
-        self,
-        goal: str,
-        results: list[ToolResult],
-        status: str,
-    ) -> str:
-        """Build a simple user-facing summary from tool results."""
-        failed = [result for result in results if not result.success]
-        lines = [
-            f"Goal: {goal}",
-            f"Status: {status}",
-            "",
-            "Completed tool calls:",
-        ]
-        for result in results:
-            marker = "OK" if result.success else "BLOCKED"
-            lines.append(f"- {marker} {result.tool_name}")
-        if failed:
-            lines.append("")
-            lines.append("Attention needed:")
-            for result in failed:
-                lines.append(f"- {result.tool_name}: {result.error}")
-        return "\n".join(lines)
 
     def _suggest_memory(self, goal: str, final_response: str):
         """Suggest memory candidates after a run without persisting them."""

@@ -66,7 +66,8 @@ A user enters a goal. JarvisOS should:
 6. Execute safe actions automatically.
 7. Pause for approval before risky actions.
 8. Record a trace of what happened.
-9. Return a clear summary of completed work, failures, and pending approvals.
+9. Synthesize a grounded final response from confirmed tool results.
+10. Return a clear summary of completed work, failures, and pending approvals.
 
 The orchestrator should not contain special-case branches for specific user
 workflows. Reference workflows such as meeting prep should exercise the same
@@ -238,6 +239,7 @@ Agents are scoped domain workers. They should be configured with:
 Likely default agents over time:
 
 - OrchestratorAgent,
+- SynthesisAgent,
 - CalendarAgent,
 - EmailAgent,
 - MemoryAgent,
@@ -249,6 +251,14 @@ Likely default agents over time:
 Avoid creating a specialist for every workflow name. For example,
 `MeetingPrepAgent` should not be necessary at first. Meeting prep should be a
 plan produced by the orchestrator using reusable agents and tools.
+
+The synthesis agent should write final responses from confirmed plan and tool
+results. It should not call tools, decide policy, or claim that an action
+completed unless the trace and tool result support that claim.
+
+Core agent prompts should live in prompt files or configuration, not hardcoded
+Python constants. Bundled defaults should work without user setup, and user
+overrides should be optional.
 
 ## 10. Tools, Plugins, Skills, and MCP
 
@@ -375,9 +385,32 @@ Track:
 Early tracing can be SQLite rows plus CLI display. Dashboards and analytics can
 come later.
 
+Trace persistence is important for debugging, benchmarking, regression analysis,
+and later UI/TUI inspection. It should record what happened without deciding
+what should happen.
+
 The system must not claim an action completed unless a tool result confirms it.
 
-## 14. Reviewer Behavior
+Final synthesis may use an LLM, but it should receive only validated plan data
+and confirmed tool results. Deterministic fallback should be available when the
+model fails, returns empty output, or makes obvious unsupported claims.
+
+## 14. Runtime Errors
+
+Runtime boundaries should normalize provider, tool, plugin, and configuration
+failures into structured JarvisOS errors.
+
+Raw exceptions should not leak through the main runtime loop. They should become:
+
+- failed tool results,
+- trace events,
+- deterministic fallbacks where possible,
+- clear user-facing diagnostics.
+
+Start small with shared base errors and expand only when real integrations
+create pressure for more detail.
+
+## 15. Reviewer Behavior
 
 A full reviewer agent is not part of the near-term core.
 
@@ -392,7 +425,7 @@ Near-term verification should be deterministic:
 An optional LLM reviewer can be explored much later, after the runtime has
 enough traces and real workflow behavior to review.
 
-## 15. Workflow Engine
+## 16. Workflow Engine
 
 Workflows should eventually be reusable templates, not hardcoded runtime logic.
 
@@ -410,7 +443,11 @@ can add:
 n8n should be treated as an optional backend/tool source, not the center of the
 JarvisOS runtime.
 
-## 16. Suggested Early Milestones
+LLM-generated plans must always be validated before execution. The validator
+should reject unknown tools, invalid arguments, and agent/tool permission
+violations, then fall back to a deterministic safe plan.
+
+## 17. Suggested Early Milestones
 
 ### Milestone 0 - Project Skeleton
 
@@ -463,7 +500,7 @@ JarvisOS runtime.
 - Add one real local model provider or OpenAI-compatible endpoint.
 - Add one real tool adapter, such as calendar, email, or notes.
 
-## 17. Python and Engineering Standards
+## 18. Python and Engineering Standards
 
 Use Python 3.11+.
 
@@ -497,7 +534,7 @@ Standards:
 - Mock external services by default.
 - Never log API keys, OAuth tokens, passwords, or secrets.
 
-## 18. Testing Strategy
+## 19. Testing Strategy
 
 Test deterministic components heavily:
 
@@ -519,7 +556,7 @@ without requiring API keys.
 Real API tests should be optional and gated behind explicit environment
 variables.
 
-## 19. Scope Boundaries
+## 20. Scope Boundaries
 
 Early versions should not try to build:
 
@@ -535,7 +572,7 @@ Early versions should not try to build:
 
 The early goal is to prove a small, extensible terminal runtime that can grow.
 
-## 20. One-Sentence Description
+## 21. One-Sentence Description
 
 JarvisOS is a terminal-first, model-agnostic personal orchestration runtime that
 coordinates user-configurable agents, tools, plugins, MCP servers, memory,

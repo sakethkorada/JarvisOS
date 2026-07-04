@@ -12,8 +12,13 @@ from jarvis.agents import default_agent_registry
 from jarvis.contracts import MemoryRecord
 from jarvis.memory import MemoryStore
 from jarvis.models import default_model_router
-from jarvis.runtime import create_default_orchestrator, create_default_tool_registry
+from jarvis.runtime import (
+    create_default_orchestrator,
+    create_default_tool_registry,
+    create_default_trace_store,
+)
 from jarvis.settings import load_settings
+from jarvis.traces import TraceSummary
 
 
 def _json_default(value: Any) -> Any:
@@ -47,7 +52,10 @@ def _build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument(
         "--mode",
         default="balanced",
-        help="Model routing mode to resolve from settings, such as balanced or private.",
+        help=(
+            "Model routing mode to resolve from settings, such as balanced "
+            "or private."
+        ),
     )
     run_parser.add_argument(
         "--config",
@@ -96,6 +104,20 @@ def _build_parser() -> argparse.ArgumentParser:
     memory_list = memory_subparsers.add_parser("list", help="List recent memories.")
     memory_list.add_argument("--limit", type=int, default=20, help="Result limit.")
     memory_list.add_argument("--config", type=Path, help="Path to config.")
+
+    traces_parser = subparsers.add_parser("traces", help="Inspect stored traces.")
+    traces_subparsers = traces_parser.add_subparsers(
+        dest="traces_command",
+        required=True,
+    )
+    traces_list = traces_subparsers.add_parser("list", help="List recent runs.")
+    traces_list.add_argument("--limit", type=int, default=20, help="Result limit.")
+    traces_list.add_argument("--config", type=Path, help="Path to config.")
+
+    traces_show = traces_subparsers.add_parser("show", help="Show a stored run.")
+    traces_show.add_argument("run_id", help="Run id to inspect.")
+    traces_show.add_argument("--json", action="store_true", help="Print JSON.")
+    traces_show.add_argument("--config", type=Path, help="Path to config.")
     return parser
 
 
@@ -116,6 +138,8 @@ def main() -> None:
         except KeyError as exc:
             parser.error(str(exc))
             return
+        if settings.traces.enabled:
+            create_default_trace_store(settings).save_run(result)
         if args.json:
             print(json.dumps(result, default=_json_default, indent=2))
         else:
@@ -167,6 +191,24 @@ def main() -> None:
                 _print_memory_record(record)
             return
 
+    if args.command == "traces":
+        settings = load_settings(args.config)
+        trace_store = create_default_trace_store(settings)
+        if args.traces_command == "list":
+            for summary in trace_store.list_runs(limit=args.limit):
+                _print_trace_summary(summary)
+            return
+        if args.traces_command == "show":
+            stored_trace = trace_store.get_run(args.run_id)
+            if stored_trace is None:
+                parser.error(f"Unknown run id: {args.run_id}")
+                return
+            if args.json:
+                print(json.dumps(stored_trace, default=_json_default, indent=2))
+            else:
+                _print_stored_trace(stored_trace)
+            return
+
     parser.error(f"Unknown command: {args.command}")
 
 
@@ -174,3 +216,26 @@ def _print_memory_record(record: MemoryRecord) -> None:
     """Print one memory record in a compact CLI format."""
     print(f"{record.id} [{record.type}] {record.content}")
     print(f"  source={record.source} updated_at={record.updated_at}")
+
+
+def _print_trace_summary(summary: TraceSummary) -> None:
+    """Print one trace summary in a compact CLI format."""
+    model = summary.selected_model or "unknown-model"
+    print(f"{summary.run_id} [{summary.status}] {summary.goal}")
+    print(f"  model={model} started_at={summary.started_at}")
+
+
+def _print_stored_trace(stored_trace: Any) -> None:
+    """Print a stored trace timeline."""
+    summary = stored_trace.summary
+    print(f"Run: {summary.run_id}")
+    print(f"Goal: {summary.goal}")
+    print(f"Status: {summary.status}")
+    print(f"Model: {summary.selected_model or 'unknown-model'}")
+    print("")
+    print("Events:")
+    for event in stored_trace.events:
+        print(f"- [{event.event_type}] {event.message}")
+    print("")
+    print("Final response:")
+    print(stored_trace.final_response)

@@ -31,6 +31,7 @@ class ModelRequest:
     goal: str
     messages: list[str] = field(default_factory=list)
     mode: str = "balanced"
+    system_prompt: str | None = None
 
 
 @dataclass(frozen=True)
@@ -60,6 +61,17 @@ class ToolSpec:
     risk_level: RiskLevel = "low"
     requires_approval: bool = False
     source: str = "builtin"
+
+
+@dataclass(frozen=True)
+class AvailableTool:
+    """Tool information exposed to a planner."""
+
+    name: str
+    description: str
+    risk_level: RiskLevel
+    requires_approval: bool
+    source: str
 
 
 ToolHandler = Callable[[dict[str, Any]], dict[str, Any]]

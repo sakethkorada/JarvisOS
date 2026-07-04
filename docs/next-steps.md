@@ -7,6 +7,13 @@
 - Added local plugin loading.
 - Added SQLite-backed memory with manual commands.
 - Added suggest-only memory extraction.
+- Added SQLite-backed trace persistence with CLI inspection.
+- Added LLM-assisted planning with deterministic validation and fallback.
+- Added LLM-first final synthesis with deterministic fallback.
+- Added the first structured model-provider error boundary.
+- Moved planner and synthesis prompts into bundled markdown files with optional
+  config overrides.
+- Improved the meeting-prep demo path with deterministic Jordan calendar data.
 
 Current model behavior:
 
@@ -38,10 +45,10 @@ Why this should come before LLM-driven planning:
 
 ## Recommended Next Steps
 
-1. Add SQLite trace persistence so runs can be inspected after completion.
-2. Add approval flow for suggested memory candidates before enabling any
+1. Add approval flow for suggested memory candidates before enabling any
    automatic writes.
+2. Add trace filtering, timing, and basic metrics for benchmarking.
 3. Expand plugin support with enable/disable state and clearer validation errors.
-4. Move from deterministic plan creation to optional LLM-assisted planning.
-5. Keep deterministic validation after any LLM-generated plan.
-6. Add online plugin acquisition later as a separate installer layer.
+4. Add richer agent config files for specialists once prompt-only overrides feel
+   too narrow.
+5. Add online plugin acquisition later as a separate installer layer.

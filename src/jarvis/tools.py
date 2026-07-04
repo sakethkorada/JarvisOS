@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from jarvis.contracts import ToolCall, ToolHandler, ToolResult, ToolSpec
+from jarvis.contracts import AvailableTool, ToolCall, ToolHandler, ToolResult, ToolSpec
 from jarvis.memory import MemoryStore
 
 
@@ -49,6 +49,19 @@ class ToolRegistry:
         """Return registered tools in stable display order."""
         return sorted(self._specs.values(), key=lambda tool: tool.name)
 
+    def available_tools(self) -> tuple[AvailableTool, ...]:
+        """Return planner-safe metadata for registered tools."""
+        return tuple(
+            AvailableTool(
+                name=tool.name,
+                description=tool.description,
+                risk_level=tool.risk_level,
+                requires_approval=tool.requires_approval,
+                source=tool.source,
+            )
+            for tool in self.list()
+        )
+
 
 def _task_breakdown(arguments: dict[str, Any]) -> dict[str, Any]:
     goal = str(arguments.get("goal", "")).strip()
@@ -71,7 +84,10 @@ def _task_create_summary(arguments: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _memory_search(arguments: dict[str, Any], memory_store: MemoryStore) -> dict[str, Any]:
+def _memory_search(
+    arguments: dict[str, Any],
+    memory_store: MemoryStore,
+) -> dict[str, Any]:
     query = str(arguments.get("query", "")).strip()
     limit = int(arguments.get("limit", 5))
     records = memory_store.search(query, limit=limit)
@@ -94,6 +110,20 @@ def _memory_search(arguments: dict[str, Any], memory_store: MemoryStore) -> dict
 
 def _calendar_search_events(arguments: dict[str, Any]) -> dict[str, Any]:
     query = str(arguments.get("query", "")).strip()
+    normalized = query.lower()
+    if "jordan" in normalized or "meeting" in normalized:
+        return {
+            "query": query,
+            "events": [
+                {
+                    "title": "Jordan project sync",
+                    "time": "tomorrow at 2:00 PM",
+                    "attendees": ["Jordan", "User"],
+                    "notes": "Review project timeline and open questions.",
+                }
+            ],
+            "source": "demo-calendar",
+        }
     return {
         "query": query,
         "events": [],
