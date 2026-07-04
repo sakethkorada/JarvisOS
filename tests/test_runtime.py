@@ -1196,6 +1196,34 @@ url = "{server_url}"
             {"text": "clean", "nested": {"keep": "value"}},
         )
 
+    def test_http_mcp_tool_error_result_fails_tool_result(self) -> None:
+        _HttpMcpHandler.force_tool_error = True
+        try:
+            with _http_mcp_server() as server_url:
+                with TemporaryDirectory() as temp_dir:
+                    root = Path(temp_dir)
+                    config_path = root / "jarvis.toml"
+                    config_path.write_text(
+                        f"""
+[[mcp.servers]]
+name = "http_demo"
+transport = "http"
+url = "{server_url}"
+""".strip(),
+                        encoding="utf-8",
+                    )
+                    settings = load_settings(config_path)
+
+                    registry = create_default_tool_registry(settings)
+                    result = registry.execute(
+                        ToolCall("http_demo.echo", {"text": "blocked"})
+                    )
+        finally:
+            _HttpMcpHandler.force_tool_error = False
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.error, "The caller does not have permission")
+
 
     def test_mcp_tool_is_registered_from_settings(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1527,6 +1555,7 @@ class _HttpMcpHandler(BaseHTTPRequestHandler):
     required_token = "test-access-token"
     require_token = False
     last_arguments: dict[str, object] | None = None
+    force_tool_error = False
 
     def do_POST(self) -> None:
         if self.path != "/mcp":
@@ -1593,6 +1622,16 @@ class _HttpMcpHandler(BaseHTTPRequestHandler):
         if method == "tools/call":
             arguments = params.get("arguments", {})
             type(self).last_arguments = arguments if isinstance(arguments, dict) else None
+            if type(self).force_tool_error:
+                return {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "The caller does not have permission",
+                        }
+                    ],
+                    "isError": True,
+                }
             text = ""
             if isinstance(arguments, dict):
                 text = str(arguments.get("text", ""))

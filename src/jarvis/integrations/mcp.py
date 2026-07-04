@@ -437,6 +437,9 @@ def _http_error_message(error: HTTPError) -> str:
 
 def _normalize_mcp_result(result: dict[str, Any]) -> dict[str, Any]:
     content = result.get("content", [])
+    if result.get("isError") is True:
+        message = _content_to_text(content) or "MCP tool returned an error."
+        raise RuntimeError(message)
     return {
         "mcp_result": result,
         "text": _content_to_text(content),
