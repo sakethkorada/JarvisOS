@@ -58,6 +58,9 @@ CLI command
   `[[mcp.servers.tools]]`.
 - HTTP MCP tools can receive bearer tokens from an environment variable or the
   local SQLite auth store.
+- Authenticated HTTP MCP tools can trigger OAuth authorization-code + PKCE on
+  first use, then store and reuse the returned tokens.
+- Expired access tokens are refreshed when a refresh token is available.
 - `jarvis auth list/set-token/clear` manages stored provider access tokens.
 - `memory.search` uses a local SQLite-backed memory store.
 - `jarvis memory add/search/list` manage local memory records.
@@ -83,9 +86,10 @@ CLI command
 - MCP support covers stdio and basic streamable HTTP tool discovery/calls.
   MCP resources, prompts, full SSE streaming, and long-lived sessions can come
   later.
-- OAuth support currently means provider metadata plus stored/env bearer tokens.
-  Browser authorization-code login and refresh-token renewal are not
-  implemented yet.
+- OAuth support includes provider metadata, local callback handling,
+  authorization-code + PKCE, token exchange, and refresh-token renewal.
+  Dynamic MCP auth discovery, dynamic client registration, and encrypted token
+  storage can come later.
 - Deterministic synthesis is still simple, but it includes grounded lines from
   actual tool outputs and acts as the fallback path.
 - `general.generate_text` is the first model-backed internal language

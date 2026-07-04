@@ -31,7 +31,8 @@ CLI
   and final synthesis.
 - `jarvis.tools` owns the tool registry and built-in local tools.
 - `jarvis.models` owns model providers and routing.
-- `jarvis.integrations` owns external adapters such as MCP and local plugins.
+- `jarvis.integrations` owns external adapters such as MCP, OAuth, and local
+  plugins.
 - `jarvis.storage` owns SQLite-backed memory, tasks, traces, approvals, and
   integration auth tokens.
 
@@ -53,10 +54,11 @@ glue.
 ## Next Substrate Seams
 
 HTTP MCP support lives under `jarvis.integrations`, next to the stdio MCP
-client. OAuth provider configuration and token persistence are split between
+client. OAuth authorization-code flow lives under `jarvis.integrations.oauth`.
+OAuth provider configuration and token persistence are split between
 `jarvis.settings` and `jarvis.storage`, with no secrets written to traces or
-model prompts. Future browser OAuth and refresh handling should extend this
-substrate instead of adding provider-specific auth branches to orchestration.
+model prompts. Future provider auth work should extend this substrate instead
+of adding provider-specific auth branches to orchestration.
 
 Cloud model APIs should extend `jarvis.models` through provider classes and the
 existing router. Specialist sub-agents should extend `jarvis.agents`,

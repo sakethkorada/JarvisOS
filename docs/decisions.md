@@ -289,3 +289,20 @@ sanitized execution metadata.
 Tradeoff: this is not a full browser OAuth flow yet. Authorization-code login,
 PKCE, refresh-token renewal, and token redaction hardening should land in the
 next auth-focused slice.
+
+## 0028 - Trigger OAuth From First Tool Use
+
+Authenticated HTTP MCP tools now resolve tokens on demand. If no valid token is
+available, JarvisOS starts an OAuth authorization-code + PKCE flow, prints and
+opens the authorization URL, captures the local callback, stores tokens, and
+continues the original MCP call.
+
+Reason: a separate login command is useful as a fallback, but the comfortable
+user experience is to ask JarvisOS to do work and only sign in when a required
+tool actually needs access. This keeps auth tied to real capability use instead
+of making users preconfigure every provider up front.
+
+Tradeoff: the current flow requires a configured provider and redirect URI. It
+does not yet implement MCP protected-resource metadata discovery, dynamic client
+registration, encrypted token storage, or provider-specific account selection
+UX.

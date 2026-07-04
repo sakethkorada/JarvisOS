@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from jarvis.agents import default_agent_registry
 from jarvis.integrations.mcp import load_mcp_tools
+from jarvis.integrations.oauth import OAuthManager
 from jarvis.integrations.plugins import load_plugins
 from jarvis.models import default_model_router
 from jarvis.orchestration.orchestrator import Orchestrator
@@ -26,7 +27,13 @@ def create_default_orchestrator(settings: JarvisSettings | None = None) -> Orche
     approval_store = ApprovalStore(settings.approvals.database_path)
     tools = default_tool_registry(memory_store, task_store)
     load_plugins(settings.plugins.paths, tools)
-    load_mcp_tools(settings.mcp.servers, tools, _mcp_auth_store(settings))
+    auth_store = _mcp_auth_store(settings)
+    load_mcp_tools(
+        settings.mcp.servers,
+        tools,
+        auth_store,
+        _oauth_manager(settings, auth_store),
+    )
     prompts = PromptLibrary(
         planner_prompt_path=settings.prompts.planner_path,
         synthesis_prompt_path=settings.prompts.synthesis_path,
@@ -54,7 +61,13 @@ def create_default_tool_registry(
         TaskStore(settings.tasks.database_path),
     )
     load_plugins(settings.plugins.paths, tools)
-    load_mcp_tools(settings.mcp.servers, tools, _mcp_auth_store(settings))
+    auth_store = _mcp_auth_store(settings)
+    load_mcp_tools(
+        settings.mcp.servers,
+        tools,
+        auth_store,
+        _oauth_manager(settings, auth_store),
+    )
     return tools
 
 
@@ -84,3 +97,13 @@ def _mcp_auth_store(settings: JarvisSettings) -> AuthStore | None:
         if server.enabled and server.auth_provider:
             return AuthStore(settings.auth.database_path)
     return None
+
+
+def _oauth_manager(
+    settings: JarvisSettings,
+    auth_store: AuthStore | None,
+) -> OAuthManager | None:
+    """Create an OAuth manager when HTTP MCP servers can use provider auth."""
+    if auth_store is None or not settings.auth.oauth_providers:
+        return None
+    return OAuthManager(settings.auth.oauth_providers, auth_store)

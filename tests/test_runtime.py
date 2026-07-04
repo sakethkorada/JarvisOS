@@ -1,11 +1,15 @@
 import unittest
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import sys
+from io import StringIO
+from socket import socket
 from threading import Thread
 import json
+from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.request import urlopen
 
 from jarvis.contracts import ToolCall, ToolExecutionContext
 from jarvis.contracts import ModelRequest, ModelResponse
@@ -21,6 +25,8 @@ from jarvis.settings import McpServerSettings, load_settings
 from jarvis.storage.approvals import ApprovalStore, apply_approved_record
 from jarvis.storage.memory import MemoryExtractor, MemoryStore
 from jarvis.integrations.mcp import McpHttpClient, McpStdioClient
+from jarvis.integrations.oauth import OAuthManager
+from jarvis.settings import OAuthProviderSettings
 from jarvis.storage.auth import AuthStore
 from jarvis.storage.tasks import TaskStore
 from jarvis.tools import default_tool_registry
@@ -1021,6 +1027,81 @@ class McpTests(unittest.TestCase):
             "http demo echo: authorized",
         )
 
+    def test_http_mcp_client_prompts_oauth_on_first_use(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            auth_store = AuthStore(Path(temp_dir) / "auth.sqlite3")
+            callback_port = _free_port()
+            with _oauth_server() as oauth_url:
+                provider = OAuthProviderSettings(
+                    name="demo_oauth",
+                    client_id="client-id",
+                    authorization_url=f"{oauth_url}/authorize",
+                    token_url=f"{oauth_url}/token",
+                    redirect_uri=f"http://127.0.0.1:{callback_port}/oauth/callback",
+                    scopes=("calendar.readonly",),
+                )
+                oauth_manager = OAuthManager(
+                    (provider,),
+                    auth_store,
+                    browser_opener=_callback_browser_opener,
+                )
+                with _http_mcp_server(require_token=True) as server_url:
+                    server = McpServerSettings(
+                        name="http_demo",
+                        transport="http",
+                        url=server_url,
+                        auth_provider="demo_oauth",
+                    )
+                    client = McpHttpClient(server, auth_store, oauth_manager)
+
+                    with redirect_stdout(StringIO()):
+                        result = client.call_tool("echo", {"text": "after auth"})
+                    stored = auth_store.get_token("demo_oauth")
+
+        self.assertEqual(
+            result["content"][0]["text"],
+            "http demo echo: after auth",
+        )
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual(stored.access_token, _HttpMcpHandler.required_token)
+        self.assertEqual(stored.refresh_token, "refresh-token")
+
+    def test_oauth_manager_refreshes_expired_token(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            auth_store = AuthStore(Path(temp_dir) / "auth.sqlite3")
+            auth_store.set_token(
+                "demo_oauth",
+                "expired-token",
+                refresh_token="refresh-token",
+                expires_at="2000-01-01T00:00:00+00:00",
+            )
+            callback_port = _free_port()
+            with _oauth_server() as oauth_url:
+                provider = OAuthProviderSettings(
+                    name="demo_oauth",
+                    client_id="client-id",
+                    authorization_url=f"{oauth_url}/authorize",
+                    token_url=f"{oauth_url}/token",
+                    redirect_uri=f"http://127.0.0.1:{callback_port}/oauth/callback",
+                    scopes=("calendar.readonly",),
+                )
+                oauth_manager = OAuthManager(
+                    (provider,),
+                    auth_store,
+                    browser_opener=lambda url: (_OAuthHandler.opened_urls.append(url) or True),
+                )
+
+                token = oauth_manager.access_token("demo_oauth")
+                stored = auth_store.get_token("demo_oauth")
+
+        self.assertEqual(token, _HttpMcpHandler.required_token)
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual(stored.refresh_token, "refresh-token")
+        self.assertEqual(_OAuthHandler.last_grant_type, "refresh_token")
+        self.assertEqual(_OAuthHandler.opened_urls, [])
+
     def test_http_mcp_tool_is_registered_from_settings(self) -> None:
         with _http_mcp_server() as server_url:
             with TemporaryDirectory() as temp_dir:
@@ -1454,6 +1535,83 @@ class _HttpMcpHandler(BaseHTTPRequestHandler):
                 ]
             }
         return {}
+
+
+@contextmanager
+def _oauth_server():
+    _OAuthHandler.reset()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _OAuthHandler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        yield f"http://{host}:{port}"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+class _OAuthHandler(BaseHTTPRequestHandler):
+    """Local OAuth token endpoint for tests."""
+
+    last_grant_type: str | None = None
+    opened_urls: list[str] = []
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.last_grant_type = None
+        cls.opened_urls = []
+
+    def do_POST(self) -> None:
+        if self.path != "/token":
+            self.send_error(404)
+            return
+        length = int(self.headers.get("Content-Length", "0"))
+        body = self.rfile.read(length).decode("utf-8")
+        values = parse_qs(body)
+        type(self).last_grant_type = _first_query_value(values, "grant_type")
+        payload = {
+            "access_token": _HttpMcpHandler.required_token,
+            "refresh_token": "refresh-token",
+            "expires_in": 3600,
+            "token_type": "Bearer",
+        }
+        encoded = json.dumps(payload).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def log_message(self, format: str, *args) -> None:
+        return
+
+
+def _callback_browser_opener(auth_url: str) -> bool:
+    _OAuthHandler.opened_urls.append(auth_url)
+    parsed = urlparse(auth_url)
+    values = parse_qs(parsed.query)
+    redirect_uri = _first_query_value(values, "redirect_uri")
+    state = _first_query_value(values, "state")
+    assert redirect_uri is not None
+    query = urlencode({"code": "authorization-code", "state": state or ""})
+    with urlopen(f"{redirect_uri}?{query}", timeout=10) as response:
+        response.read()
+    return True
+
+
+def _first_query_value(values: dict[str, list[str]], key: str) -> str | None:
+    items = values.get(key)
+    if not items:
+        return None
+    return items[0]
+
+
+def _free_port() -> int:
+    with socket() as item:
+        item.bind(("127.0.0.1", 0))
+        return int(item.getsockname()[1])
 
 
 class StaticModelProvider(ModelProvider):

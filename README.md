@@ -356,7 +356,12 @@ risk_level = "medium"
 requires_approval = true
 ```
 
-Bearer auth can come from an environment variable or the local auth store:
+When an HTTP MCP server has `auth_provider`, JarvisOS can start an OAuth
+authorization-code + PKCE flow on first use. It prints and opens the provider
+sign-in URL, listens on the configured local `redirect_uri`, stores the returned
+tokens, and refreshes expired access tokens when a refresh token is available.
+
+Manual bearer auth is still available as an escape hatch:
 
 ```powershell
 $env:GOOGLE_MCP_ACCESS_TOKEN="<access-token>"
@@ -366,8 +371,8 @@ python -m jarvis auth clear google --config google-calendar.toml
 ```
 
 The current auth layer stores provider tokens and supplies bearer headers to
-HTTP MCP. Full browser OAuth authorization-code flow and refresh handling are
-the next auth slice.
+HTTP MCP. The OAuth flow is triggered by first use of a configured authenticated
+HTTP MCP server; no separate `jarvis auth login` command is required.
 
 Per-tool policy overrides can make read-only tools auto-allowed while writes
 remain approval-gated:

@@ -88,6 +88,12 @@ class OAuthProviderSettings:
     redirect_uri: str | None = None
     scopes: tuple[str, ...] = ()
 
+    def client_secret(self) -> str | None:
+        """Resolve the client secret from its configured environment variable."""
+        if self.client_secret_env is None:
+            return None
+        return os.getenv(self.client_secret_env)
+
 
 @dataclass(frozen=True)
 class AuthSettings:

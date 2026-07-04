@@ -11,6 +11,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from jarvis.contracts import ToolSpec
+from jarvis.integrations.oauth import OAuthManager
 from jarvis.settings import McpServerSettings
 from jarvis.storage.auth import AuthStore
 from jarvis.tools.registry import ToolRegistry
@@ -27,6 +28,7 @@ class McpToolBinding:
     mcp_tool_name: str
     jarvis_tool_name: str
     auth_store: AuthStore | None = None
+    oauth_manager: OAuthManager | None = None
 
 
 class McpStdioClient:
@@ -68,12 +70,14 @@ class McpHttpClient:
         self,
         server: McpServerSettings,
         auth_store: AuthStore | None = None,
+        oauth_manager: OAuthManager | None = None,
         timeout_seconds: float = 10,
     ) -> None:
         if server.url is None:
             raise ValueError("HTTP MCP server requires url.")
         self._server = server
         self._auth_store = auth_store
+        self._oauth_manager = oauth_manager
         self._timeout_seconds = timeout_seconds
         self._next_id = 1
         self._session_id: str | None = None
@@ -151,6 +155,7 @@ class McpHttpClient:
         self,
         message: dict[str, Any],
         allow_empty: bool = False,
+        can_authorize: bool = True,
     ) -> dict[str, Any]:
         assert self._server.url is not None
         headers = {
@@ -160,7 +165,11 @@ class McpHttpClient:
         }
         if self._session_id is not None:
             headers["Mcp-Session-Id"] = self._session_id
-        token = _bearer_token(self._server, self._auth_store)
+        token = _bearer_token(
+            self._server,
+            self._auth_store,
+            self._oauth_manager,
+        )
         if token is not None:
             headers["Authorization"] = f"Bearer {token}"
         body = json.dumps(message, separators=(",", ":")).encode("utf-8")
@@ -178,6 +187,8 @@ class McpHttpClient:
                 payload = response.read().decode("utf-8")
                 content_type = response.headers.get("Content-Type", "")
         except HTTPError as exc:
+            if exc.code == 401 and self._oauth_manager is not None and can_authorize:
+                return self._retry_after_authorization(message, allow_empty)
             raise RuntimeError(_http_error_message(exc)) from exc
         except URLError as exc:
             raise RuntimeError(f"MCP HTTP request failed: {exc.reason}") from exc
@@ -191,6 +202,19 @@ class McpHttpClient:
         if not isinstance(decoded, dict):
             raise RuntimeError("MCP HTTP response must be a JSON object.")
         return decoded
+
+    def _retry_after_authorization(
+        self,
+        message: dict[str, Any],
+        allow_empty: bool,
+    ) -> dict[str, Any]:
+        if self._server.auth_provider is None:
+            raise RuntimeError("MCP HTTP server requires auth but has no provider.")
+        self._oauth_manager.access_token(
+            self._server.auth_provider,
+            force_authorize=True,
+        )
+        return self._post_message(message, allow_empty, can_authorize=False)
 
 
 class McpSession:
@@ -296,12 +320,13 @@ def load_mcp_tools(
     servers: tuple[McpServerSettings, ...],
     registry: ToolRegistry,
     auth_store: AuthStore | None = None,
+    oauth_manager: OAuthManager | None = None,
 ) -> None:
     """Load tools from configured MCP servers into the tool registry."""
     for server in servers:
         if not server.enabled:
             continue
-        client = _mcp_client(server, auth_store)
+        client = _mcp_client(server, auth_store, oauth_manager)
         for tool in client.list_tools():
             mcp_name = str(tool.get("name", "")).strip()
             if not mcp_name:
@@ -315,6 +340,7 @@ def load_mcp_tools(
                 mcp_tool_name=mcp_name,
                 jarvis_tool_name=jarvis_name,
                 auth_store=auth_store,
+                oauth_manager=oauth_manager,
             )
             risk_level, requires_approval = _mcp_tool_policy(
                 server,
@@ -357,7 +383,11 @@ def _execute_mcp_tool(
     binding: McpToolBinding,
     arguments: dict[str, Any],
 ) -> dict[str, Any]:
-    client = _mcp_client(binding.server, binding.auth_store)
+    client = _mcp_client(
+        binding.server,
+        binding.auth_store,
+        binding.oauth_manager,
+    )
     result = client.call_tool(binding.mcp_tool_name, arguments)
     return _normalize_mcp_result(result)
 
@@ -365,22 +395,26 @@ def _execute_mcp_tool(
 def _mcp_client(
     server: McpServerSettings,
     auth_store: AuthStore | None,
+    oauth_manager: OAuthManager | None,
 ) -> McpStdioClient | McpHttpClient:
     """Create the right MCP client for a configured server."""
     if server.transport == "http":
-        return McpHttpClient(server, auth_store)
+        return McpHttpClient(server, auth_store, oauth_manager)
     return McpStdioClient(server)
 
 
 def _bearer_token(
     server: McpServerSettings,
     auth_store: AuthStore | None,
+    oauth_manager: OAuthManager | None,
 ) -> str | None:
     """Resolve a bearer token from environment or local auth storage."""
     if server.bearer_token_env:
         token = os.getenv(server.bearer_token_env)
         if token:
             return token
+    if server.auth_provider and oauth_manager is not None:
+        return oauth_manager.access_token(server.auth_provider)
     if server.auth_provider and auth_store is not None:
         record = auth_store.get_token(server.auth_provider)
         if record is not None:

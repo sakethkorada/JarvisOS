@@ -6,6 +6,7 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from jarvis.contracts import utc_now
@@ -36,6 +37,7 @@ class AuthStore:
         access_token: str,
         refresh_token: str | None = None,
         expires_at: str | None = None,
+        preserve_refresh_token: bool = False,
     ) -> OAuthTokenRecord:
         """Persist token material for a provider."""
         provider_name = provider.strip()
@@ -45,6 +47,11 @@ class AuthStore:
         if not token:
             raise ValueError("Access token is required.")
         updated_at = utc_now()
+        stored_refresh_token = refresh_token
+        if preserve_refresh_token and stored_refresh_token is None:
+            existing = self.get_token(provider_name)
+            if existing is not None:
+                stored_refresh_token = existing.refresh_token
         with self._connect() as connection:
             connection.execute(
                 """
@@ -62,12 +69,12 @@ class AuthStore:
                     expires_at = excluded.expires_at,
                     updated_at = excluded.updated_at
                 """,
-                (provider_name, token, refresh_token, expires_at, updated_at),
+                (provider_name, token, stored_refresh_token, expires_at, updated_at),
             )
         return OAuthTokenRecord(
             provider=provider_name,
             access_token=token,
-            refresh_token=refresh_token,
+            refresh_token=stored_refresh_token,
             expires_at=expires_at,
             updated_at=updated_at,
         )
@@ -122,6 +129,19 @@ class AuthStore:
                 (provider,),
             )
         return cursor.rowcount > 0
+
+    def token_is_expired(
+        self,
+        record: OAuthTokenRecord,
+        skew_seconds: int = 60,
+    ) -> bool:
+        """Return whether a token record is expired or near expiry."""
+        if record.expires_at is None:
+            return False
+        expires_at = datetime.fromisoformat(record.expires_at)
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        return datetime.now(timezone.utc) + timedelta(seconds=skew_seconds) >= expires_at
 
     def _initialize(self) -> None:
         with self._connect() as connection:

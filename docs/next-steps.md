@@ -28,6 +28,8 @@
 - Added streamable HTTP MCP discovery/calls beside stdio MCP.
 - Added OAuth provider settings, local token storage, and bearer-token injection
   for HTTP MCP.
+- Added on-demand OAuth authorization-code + PKCE flow with local callback
+  capture and refresh-token renewal.
 
 Current model behavior:
 
@@ -59,20 +61,22 @@ Why this should come before LLM-driven planning:
 
 ## Recommended Next Steps
 
-1. Add browser OAuth authorization-code flow, PKCE, and token refresh handling.
-2. Try Google Calendar read-only tools first, especially listing calendars,
+1. Try Google Calendar read-only tools first, especially listing calendars,
    listing events, and getting one event.
+2. Add dynamic MCP auth discovery and dynamic client registration if Google's
+   remote MCP surface needs it.
 3. Add Gmail read-only and draft-only paths after Calendar reads work.
 4. Add Spotify read tools or low-impact playback tools behind per-tool policy.
-5. Add resume/apply behavior for approved external or high-risk tool execution
+5. Add encrypted token storage or OS keychain support before broader daily use.
+6. Add resume/apply behavior for approved external or high-risk tool execution
    items.
-6. Add trace filtering, timing, and basic metrics for benchmarking.
-7. Expand plugin support with enable/disable state and clearer validation errors.
-8. Add richer agent config files for specialists once prompt-only overrides feel
+7. Add trace filtering, timing, and basic metrics for benchmarking.
+8. Expand plugin support with enable/disable state and clearer validation errors.
+9. Add richer agent config files for specialists once prompt-only overrides feel
    too narrow.
-9. Add named step outputs or richer workflow variables once `$last.text` becomes
+10. Add named step outputs or richer workflow variables once `$last.text` becomes
    too narrow.
-10. Add online plugin acquisition later as a separate installer layer.
+11. Add online plugin acquisition later as a separate installer layer.
 
 ## Near-Term Design Notes
 

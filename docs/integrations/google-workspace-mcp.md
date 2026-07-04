@@ -2,9 +2,9 @@
 
 JarvisOS supports MCP tools over stdio and streamable HTTP. Google documents
 official Google Workspace MCP servers for Gmail, Drive, Calendar, Chat, and
-People over HTTP with OAuth. JarvisOS can now attach bearer tokens from an
-environment variable or the local auth store, but it does not yet run the full
-browser OAuth authorization-code flow or refresh expired tokens automatically.
+People over HTTP with OAuth. JarvisOS can attach bearer tokens from an
+environment variable or the local auth store, and it can run an on-demand
+authorization-code + PKCE flow for configured providers.
 
 ## Current Read-Only Calendar Path
 
@@ -43,9 +43,8 @@ The official Google Workspace MCP servers require:
 
 JarvisOS still needs:
 
-- browser OAuth authorization-code flow,
-- token refresh handling,
 - redaction rules for sensitive Workspace responses.
+- dynamic MCP auth discovery and dynamic client registration.
 
 Example remote Calendar config:
 
@@ -76,7 +75,12 @@ risk_level = "medium"
 requires_approval = true
 ```
 
-For the current slice, provide a bearer token one of two ways:
+On first use of `google_calendar`, JarvisOS should print and open the Google
+authorization URL. After the browser redirects to the local callback URI,
+JarvisOS stores the returned access and refresh tokens and continues the MCP
+call.
+
+Manual token entry still works as a fallback:
 
 ```powershell
 $env:GOOGLE_MCP_ACCESS_TOKEN="<access-token>"
