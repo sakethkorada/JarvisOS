@@ -8,7 +8,7 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any
 
-from jarvis.contracts import TaskRecord, new_id, utc_now
+from jarvis.contracts import TaskRecord, TaskStatus, new_id, utc_now
 
 
 class TaskStore:
@@ -72,6 +72,45 @@ class TaskStore:
                 (limit,),
             ).fetchall()
         return [_record_from_row(row) for row in rows]
+
+    def get(self, task_id: str) -> TaskRecord | None:
+        """Return one task by id."""
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT id, title, status, source, created_at, updated_at,
+                       metadata_json
+                FROM tasks
+                WHERE id = ?
+                """,
+                (task_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return _record_from_row(row)
+
+    def complete(self, task_id: str) -> TaskRecord:
+        """Mark a task as done and return the updated record."""
+        return self._set_status(task_id, "done")
+
+    def _set_status(self, task_id: str, status: TaskStatus) -> TaskRecord:
+        existing = self.get(task_id)
+        if existing is None:
+            raise KeyError(f"Unknown task id: {task_id}")
+        now = utc_now()
+        with closing(self._connect()) as connection:
+            with connection:
+                connection.execute(
+                    """
+                    UPDATE tasks
+                    SET status = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (status, now, task_id),
+                )
+        updated = self.get(task_id)
+        assert updated is not None
+        return updated
 
     def _ensure_schema(self) -> None:
         with closing(self._connect()) as connection:

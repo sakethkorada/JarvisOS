@@ -10,7 +10,7 @@ from typing import Any
 
 from jarvis.approvals import apply_approved_record
 from jarvis.agents import default_agent_registry
-from jarvis.contracts import ApprovalRecord, MemoryRecord
+from jarvis.contracts import ApprovalRecord, MemoryRecord, TaskRecord
 from jarvis.memory import MemoryStore
 from jarvis.models import default_model_router
 from jarvis.runtime import (
@@ -116,6 +116,15 @@ def _build_parser() -> argparse.ArgumentParser:
     tasks_list = tasks_subparsers.add_parser("list", help="List recent tasks.")
     tasks_list.add_argument("--limit", type=int, default=20, help="Result limit.")
     tasks_list.add_argument("--config", type=Path, help="Path to config.")
+    tasks_show = tasks_subparsers.add_parser("show", help="Show one task.")
+    tasks_show.add_argument("task_id", help="Task id to inspect.")
+    tasks_show.add_argument("--config", type=Path, help="Path to config.")
+    tasks_complete = tasks_subparsers.add_parser(
+        "complete",
+        help="Mark a task complete.",
+    )
+    tasks_complete.add_argument("task_id", help="Task id to complete.")
+    tasks_complete.add_argument("--config", type=Path, help="Path to config.")
 
     traces_parser = subparsers.add_parser("traces", help="Inspect stored traces.")
     traces_subparsers = traces_parser.add_subparsers(
@@ -251,8 +260,22 @@ def main() -> None:
         task_store = create_default_task_store(settings)
         if args.tasks_command == "list":
             for record in task_store.list(limit=args.limit):
-                print(f"{record.id} [{record.status}] {record.title}")
-                print(f"  source={record.source} updated_at={record.updated_at}")
+                _print_task_record(record)
+            return
+        if args.tasks_command == "show":
+            record = task_store.get(args.task_id)
+            if record is None:
+                parser.error(f"Unknown task id: {args.task_id}")
+                return
+            _print_task_record(record, verbose=True)
+            return
+        if args.tasks_command == "complete":
+            try:
+                record = task_store.complete(args.task_id)
+            except KeyError as exc:
+                parser.error(str(exc))
+                return
+            _print_task_record(record)
             return
 
     if args.command == "traces":
@@ -318,6 +341,16 @@ def _print_memory_record(record: MemoryRecord) -> None:
     """Print one memory record in a compact CLI format."""
     print(f"{record.id} [{record.type}] {record.content}")
     print(f"  source={record.source} updated_at={record.updated_at}")
+
+
+def _print_task_record(record: TaskRecord, verbose: bool = False) -> None:
+    """Print one task record in a compact CLI format."""
+    print(f"{record.id} [{record.status}] {record.title}")
+    print(f"  source={record.source} updated_at={record.updated_at}")
+    if verbose and record.metadata:
+        print("  metadata:")
+        for key, value in record.metadata.items():
+            print(f"    {key}={value}")
 
 
 def _print_approval_record(

@@ -179,3 +179,23 @@ and is visible through `jarvis tasks list`.
 Reason: not every write should require user approval. The approval queue should
 protect risky, external, or sensitive actions while simple local productivity
 actions remain pleasant to use.
+
+## 0018 - Keep Deterministic Guardrails Around LLM Orchestration
+
+The local POC should use LLM planning and synthesis when a real model is
+selected, while keeping tool execution, policy, approvals, storage, validation,
+and fallback behavior deterministic.
+
+Reason: JarvisOS should become a flexible non-hardcoded orchestration runtime,
+but reliable state changes and safety decisions need inspectable code paths.
+This lets us integrate MCP tools, A2A agents, ADK agents, and external APIs
+later without letting model output bypass contracts.
+
+## 0019 - Start Memory Dedupe Deterministically
+
+Approved memory writes now skip obvious normalized duplicates before inserting a
+new record.
+
+Reason: duplicate memory is already visible in local testing. A simple
+deterministic duplicate check reduces clutter now. More nuanced merge/update
+behavior can come later through a memory review layer.

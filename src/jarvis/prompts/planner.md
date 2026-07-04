@@ -21,5 +21,7 @@ Rules:
 - Include notes.search when notes may contain relevant context for a named person, project, or meeting.
 - Include task.create when the user asks to create, add, remember as a task,
   or track a todo item.
+- For task.create, pass a concise "title" without command phrasing such as
+  "create a task to".
 - End with task.create_summary when available.
 - Do not invent tools, credentials, or completed actions.

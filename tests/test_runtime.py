@@ -176,8 +176,30 @@ database_path = "{task_path.name}"
 
         self.assertEqual(result.status, "completed")
         self.assertEqual(len(tasks), 1)
-        self.assertIn("ask Jordan about API migration", tasks[0].title)
+        self.assertEqual(tasks[0].title, "Ask Jordan about API migration")
         self.assertIn("task.create", [item.tool_name for item in result.step_results])
+
+    def test_compound_goal_creates_clean_task_title(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "jarvis.toml"
+            config_path.write_text(
+                """
+[tasks]
+database_path = "tasks.sqlite3"
+""".strip(),
+                encoding="utf-8",
+            )
+            settings = load_settings(config_path)
+
+            create_default_orchestrator(settings).run(
+                "Prepare me for my meeting with Jordan tomorrow and "
+                "create a task to ask Jordan about API migration",
+                model_name="fake-local",
+            )
+            tasks = TaskStore(settings.tasks.database_path).list()
+
+        self.assertEqual(tasks[0].title, "Ask Jordan about API migration")
 
 
 class SettingsTests(unittest.TestCase):
@@ -402,16 +424,22 @@ class MemoryTests(unittest.TestCase):
 class TaskTests(unittest.TestCase):
     """Tests for local SQLite task storage."""
 
-    def test_create_and_list_tasks(self) -> None:
+    def test_create_list_and_complete_tasks(self) -> None:
         with TemporaryDirectory() as temp_dir:
             task_store = TaskStore(Path(temp_dir) / "tasks.sqlite3")
-            task_store.create("Ask Jordan about API migration.")
+            created = task_store.create("Ask Jordan about API migration.")
 
             tasks = task_store.list()
+            shown = task_store.get(created.id)
+            completed = task_store.complete(created.id)
 
         self.assertEqual(len(tasks), 1)
         self.assertEqual(tasks[0].status, "open")
         self.assertEqual(tasks[0].title, "Ask Jordan about API migration.")
+        self.assertIsNotNone(shown)
+        assert shown is not None
+        self.assertEqual(shown.id, created.id)
+        self.assertEqual(completed.status, "done")
 
 
 class ApprovalTests(unittest.TestCase):
@@ -442,6 +470,33 @@ class ApprovalTests(unittest.TestCase):
         self.assertEqual(effect, "Memory saved.")
         self.assertEqual(len(memories), 1)
         self.assertEqual(memories[0].type, "preference")
+
+    def test_apply_memory_approval_skips_normalized_duplicate(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            approval_store = ApprovalStore(root / "approvals.sqlite3")
+            memory_store = MemoryStore(root / "memory.sqlite3")
+            memory_store.add(
+                "User prefers meetings after 10 AM.",
+                memory_type="preference",
+            )
+            record = approval_store.create(
+                approval_type="memory.add",
+                title="Save memory",
+                reason="The user stated an explicit preference.",
+                payload={
+                    "memory_type": "preference",
+                    "content": "Remember that I prefer meetings after 10 AM.",
+                    "source": "run",
+                },
+            )
+
+            approved = approval_store.decide(record.id, "approved")
+            effect = apply_approved_record(approved, memory_store)
+            memories = memory_store.list()
+
+        self.assertIn("skipped duplicate", effect)
+        self.assertEqual(len(memories), 1)
 
     def test_reject_approval_records_decision(self) -> None:
         with TemporaryDirectory() as temp_dir:

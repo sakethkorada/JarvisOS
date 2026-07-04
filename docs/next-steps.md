@@ -17,6 +17,8 @@
 - Added a SQLite-backed approval queue with CLI list/show/approve/reject.
 - Added `task.create` and a local SQLite task store for auto-allowed local
   writes.
+- Added `tasks show/complete` and simple task-title cleanup.
+- Added deterministic duplicate prevention for approved memory writes.
 
 Current model behavior:
 
@@ -48,10 +50,12 @@ Why this should come before LLM-driven planning:
 
 ## Recommended Next Steps
 
-1. Add resume/apply behavior for approved external or high-risk tool execution
+1. Polish the canonical local POC with Ollama as the default non-fake path.
+2. Add a first MCP/tool adapter plan for Google Calendar and Gmail read-only.
+3. Add resume/apply behavior for approved external or high-risk tool execution
    items.
-2. Add trace filtering, timing, and basic metrics for benchmarking.
-3. Expand plugin support with enable/disable state and clearer validation errors.
-4. Add richer agent config files for specialists once prompt-only overrides feel
+4. Add trace filtering, timing, and basic metrics for benchmarking.
+5. Expand plugin support with enable/disable state and clearer validation errors.
+6. Add richer agent config files for specialists once prompt-only overrides feel
    too narrow.
-5. Add online plugin acquisition later as a separate installer layer.
+7. Add online plugin acquisition later as a separate installer layer.

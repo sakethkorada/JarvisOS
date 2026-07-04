@@ -130,11 +130,30 @@ later workflow feature.
 
 JarvisOS includes a low-risk local task write tool. `task.create` runs
 automatically because it only writes to the configured local SQLite task store.
+Task titles are lightly cleaned before storage, so command phrasing is removed
+when possible.
 
 ```powershell
 python -m jarvis run "Create a task to ask Jordan about API migration" --config jarvis.toml.example --model fake-local
 python -m jarvis tasks list --config jarvis.toml.example
+python -m jarvis tasks show <task_id> --config jarvis.toml.example
+python -m jarvis tasks complete <task_id> --config jarvis.toml.example
 ```
+
+## Canonical Local POC
+
+This command exercises the current local-first vertical runtime:
+
+```powershell
+$env:PYTHONPATH="src"
+python -m jarvis run "Prepare me for my meeting with Jordan tomorrow and create a task to ask Jordan about API migration" --config jarvis.toml.example --model "ollama/llama3.2:3b"
+python -m jarvis tasks list --config jarvis.toml.example
+python -m jarvis approvals list --config jarvis.toml.example
+python -m jarvis traces list --config jarvis.toml.example
+```
+
+Use `--model fake-local` for deterministic smoke checks. Use Ollama for the
+LLM planner and synthesis path.
 
 ### Traces
 
@@ -295,6 +314,7 @@ requires_approval = false
 JarvisOS has a small SQLite-backed memory store. Manual memory commands are real;
 automatic extraction is currently suggest-only and does not silently write
 memories.
+Approved memory writes skip obvious normalized duplicates.
 
 ```powershell
 $env:PYTHONPATH="src"

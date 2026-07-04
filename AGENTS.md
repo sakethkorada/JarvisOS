@@ -343,6 +343,10 @@ Low-risk local writes may run automatically when they only affect local,
 inspectable JarvisOS state. Examples include creating a local task. External,
 sensitive, destructive, or user-visible actions should still require approval.
 
+The intended POC path should be non-hardcoded when a real model is selected:
+LLMs may plan and synthesize, while deterministic code validates plans, routes
+tools, enforces policies, records traces, and applies state changes.
+
 ## 12. Memory
 
 Memory should be useful but simple at first.
@@ -371,6 +375,7 @@ Important memory rules:
 - Do not silently store sensitive private content.
 - Let users inspect and delete memory.
 - Do not stuff all memory into every prompt; retrieve only relevant context.
+- Avoid obvious duplicate memories before inserting approved candidates.
 
 ## 13. Tracing and Observability
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 from contextlib import closing
 from pathlib import Path
@@ -164,9 +165,14 @@ def apply_approved_record(
 ) -> str:
     """Apply side effects for an approved record when supported."""
     if record.type == "memory.add":
+        content = str(record.payload["content"])
+        memory_type = _memory_type(record.payload.get("memory_type"))
+        duplicate = _find_duplicate_memory(memory_store, content, memory_type)
+        if duplicate is not None:
+            return f"Memory already exists; skipped duplicate {duplicate.id}."
         memory_store.add(
-            content=str(record.payload["content"]),
-            memory_type=_memory_type(record.payload.get("memory_type")),
+            content=content,
+            memory_type=memory_type,
             source=str(record.payload.get("source", "approval")),
             metadata={
                 "approval_id": record.id,
@@ -197,3 +203,34 @@ def _memory_type(value: Any) -> MemoryType:
     if value in ("preference", "fact", "note", "context"):
         return value
     return "note"
+
+
+def _find_duplicate_memory(
+    memory_store: MemoryStore,
+    content: str,
+    memory_type: MemoryType,
+):
+    normalized_content = _normalize_memory_content(content)
+    for record in memory_store.list(limit=200):
+        if record.type != memory_type:
+            continue
+        if _normalize_memory_content(record.content) == normalized_content:
+            return record
+    return None
+
+
+def _normalize_memory_content(content: str) -> str:
+    normalized = content.lower().strip()
+    normalized = re.sub(r"[^a-z0-9\s]", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    replacements = (
+        ("remember that i prefer", "user prefers"),
+        ("remember that i", "user"),
+        ("my preference is", "user prefers"),
+        ("i prefer", "user prefers"),
+    )
+    for old, new in replacements:
+        if normalized.startswith(old):
+            normalized = new + normalized[len(old) :]
+            normalized = re.sub(r"\s+", " ", normalized).strip()
+    return normalized

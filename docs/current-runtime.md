@@ -47,7 +47,7 @@ CLI command
 - `memory.search` uses a local SQLite-backed memory store.
 - `jarvis memory add/search/list` manage local memory records.
 - `task.create` writes low-risk local tasks to SQLite without approval.
-- `jarvis tasks list` prints recent local tasks.
+- `jarvis tasks list/show/complete` manage local tasks.
 - Memory records persist across sessions for the configured SQLite database.
 - Run traces persist to SQLite when `[traces].enabled = true`.
 - `jarvis traces list/show` inspect stored runs and event timelines.
@@ -55,6 +55,7 @@ CLI command
 - Suggested memory candidates are queued for approval instead of being saved
   silently.
 - Approved `memory.add` records are written to the configured memory store.
+- Approved `memory.add` records skip obvious normalized duplicates.
 - End-of-run memory extraction is suggest-only and does not auto-save memories.
 - The JSON output includes trace events, tool results, plan steps, and final
   status.
@@ -88,6 +89,7 @@ python -m jarvis approvals list --config jarvis.toml.example
 python -m jarvis approvals show <approval_id> --config jarvis.toml.example
 python -m jarvis run "Create a task to ask Jordan about API migration" --config jarvis.toml.example --model fake-local
 python -m jarvis tasks list --config jarvis.toml.example
+python -m jarvis tasks complete <task_id> --config jarvis.toml.example
 python -m jarvis run "prepare me for my meeting tomorrow" --model "ollama/llama3.2:3b"
 python -m jarvis run "prepare me for my meeting tomorrow" --mode private
 python -m jarvis run "prepare me for my meeting tomorrow" --model "ollama/llama3.2:3b" --json
@@ -104,3 +106,5 @@ python -m unittest discover -s tests
 - `traces show --json` prints a stored run trace as JSON.
 - `approvals approve <approval_id>` applies supported approved items.
 - `tasks list --limit N` prints recent local tasks.
+- `tasks show <task_id>` prints one task.
+- `tasks complete <task_id>` marks one task done.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from jarvis.contracts import AvailableTool, ToolCall, ToolHandler, ToolResult, ToolSpec
@@ -86,7 +87,8 @@ def _task_create_summary(arguments: dict[str, Any]) -> dict[str, Any]:
 
 
 def _task_create(arguments: dict[str, Any], task_store: TaskStore) -> dict[str, Any]:
-    title = str(arguments.get("title") or arguments.get("goal") or "").strip()
+    raw_title = str(arguments.get("title") or arguments.get("goal") or "").strip()
+    title = _clean_task_title(raw_title)
     if not title:
         raise ValueError("Task title is required.")
     record = task_store.create(
@@ -105,6 +107,38 @@ def _task_create(arguments: dict[str, Any], task_store: TaskStore) -> dict[str, 
             "metadata": record.metadata,
         }
     }
+
+
+def _clean_task_title(title: str) -> str:
+    """Remove common command phrasing from local task titles."""
+    cleaned = title.strip()
+    lowered = cleaned.lower()
+    markers = (
+        "create a task to ",
+        "create task to ",
+        "add a task to ",
+        "add task to ",
+        "create a todo to ",
+        "add a todo to ",
+    )
+    for marker in markers:
+        index = lowered.find(marker)
+        if index >= 0:
+            cleaned = cleaned[index + len(marker) :].strip()
+            lowered = cleaned.lower()
+            break
+    patterns = (
+        r"^create\s+(?:a\s+)?task\s+to\s+",
+        r"^add\s+(?:a\s+)?task\s+to\s+",
+        r"^create\s+(?:a\s+)?todo\s+to\s+",
+        r"^add\s+(?:a\s+)?todo\s+to\s+",
+        r"^todo:\s*",
+    )
+    for pattern in patterns:
+        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE).strip()
+    if cleaned:
+        return cleaned[:1].upper() + cleaned[1:]
+    return cleaned
 
 
 def _memory_search(
