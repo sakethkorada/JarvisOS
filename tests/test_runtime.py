@@ -11,7 +11,7 @@ import json
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import urlopen
 
-from jarvis.contracts import ToolCall, ToolExecutionContext
+from jarvis.contracts import ToolCall, ToolExecutionContext, ToolSpec
 from jarvis.contracts import ModelRequest, ModelResponse
 from jarvis.errors import ModelProviderError
 from jarvis.models import ModelProvider, ModelRouter
@@ -787,6 +787,36 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(source, "llm")
         self.assertEqual(plan.steps[0].agent_name, "general")
         self.assertEqual(plan.steps[0].tool_call.tool_name, "general.generate_text")
+
+    def test_fallback_prefers_external_calendar_list_tool(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tools = default_tool_registry(MemoryStore(Path(temp_dir) / "memory.sqlite3"))
+            tools.register(
+                ToolSpec(
+                    name="external_calendar.list_calendars",
+                    description="List external calendars.",
+                    source="mcp:external_calendar",
+                ),
+                lambda arguments: {"text": "external calendars"},
+            )
+            planner = Planner(
+                default_agent_registry(),
+                tools,
+                ModelRouter({}),
+                PromptLibrary().planner_prompt(),
+            )
+
+            plan = planner.create_fallback_plan("Use Calendar to list my calendars")
+
+        tool_names = [step.tool_call.tool_name for step in plan.steps]
+        self.assertIn("external_calendar.list_calendars", tool_names)
+        self.assertNotIn("calendar.search_events", tool_names)
+
+    def test_bundled_prompt_prefers_external_calendar_tools(self) -> None:
+        prompt = PromptLibrary().planner_prompt()
+
+        self.assertIn("prefer external read-only calendar tools", prompt)
+        self.assertIn("calendar.search_events only when no external", prompt)
 
 
 class GeneralToolTests(unittest.TestCase):

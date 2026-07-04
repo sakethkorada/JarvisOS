@@ -16,8 +16,13 @@ Schema:
 Rules:
 - Use only available tools.
 - Prefer read-only tools before summary tools.
+- When a user names a provider or external service, prefer that provider's
+  registered MCP/plugin tools over built-in demo tools.
+- For calendar requests, prefer external read-only calendar tools such as
+  *.list_calendars, *.list_events, or *.get_event when available. Use the
+  built-in calendar.search_events only when no external calendar tool matches.
 - Include memory.search when useful.
-- Include calendar.search_events for meeting, schedule, calendar, or time-bound requests.
+- Include a calendar tool for meeting, schedule, calendar, or time-bound requests.
 - Include notes.search when notes may contain relevant context for a named person, project, or meeting.
 - Include general.generate_text when the user asks to generate, draft,
   compose, rewrite, write, summarize, or invent wording before another action.

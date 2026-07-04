@@ -76,15 +76,56 @@ class Planner:
             )
         ]
 
-        if any(word in normalized for word in ("meeting", "calendar", "schedule")):
-            steps.append(
-                PlanStep(
-                    id=new_id("step"),
-                    agent_name="calendar",
-                    tool_call=ToolCall("calendar.search_events", {"query": goal}),
-                    description="Check calendar context.",
-                )
+        if "calendar" in normalized and "list" in normalized:
+            list_calendars_tool = _first_matching_tool(
+                self._tools,
+                suffix=".list_calendars",
             )
+            if list_calendars_tool is not None:
+                steps.append(
+                    PlanStep(
+                        id=new_id("step"),
+                        agent_name=_agent_for_tool(list_calendars_tool),
+                        tool_call=ToolCall(list_calendars_tool, {}),
+                        description="List configured calendars.",
+                    )
+                )
+            elif self._tools.has("calendar.search_events"):
+                steps.append(
+                    PlanStep(
+                        id=new_id("step"),
+                        agent_name="calendar",
+                        tool_call=ToolCall("calendar.search_events", {"query": goal}),
+                        description="Check calendar context.",
+                    )
+                )
+        elif any(word in normalized for word in ("meeting", "calendar", "schedule")):
+            calendar_tool = _first_matching_tool(self._tools, suffix=".list_events")
+            if calendar_tool is None:
+                calendar_tool = (
+                    "calendar.search_events"
+                    if self._tools.has("calendar.search_events")
+                    else None
+                )
+            if calendar_tool is not None:
+                arguments = (
+                    {"query": goal}
+                    if calendar_tool == "calendar.search_events"
+                    else {"calendarId": "primary"}
+                )
+                description = (
+                    "Check calendar context."
+                    if calendar_tool == "calendar.search_events"
+                    else "List calendar events from the primary calendar."
+                )
+                steps.append(
+                    PlanStep(
+                        id=new_id("step"),
+                        agent_name=_agent_for_tool(calendar_tool),
+                        tool_call=ToolCall(calendar_tool, arguments),
+                        description=description,
+                    )
+                )
 
         should_search_notes = any(
             word in normalized
