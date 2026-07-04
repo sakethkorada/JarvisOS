@@ -1102,6 +1102,38 @@ class McpTests(unittest.TestCase):
         self.assertEqual(_OAuthHandler.last_grant_type, "refresh_token")
         self.assertEqual(_OAuthHandler.opened_urls, [])
 
+    def test_oauth_manager_accepts_pasted_code_when_callback_does_not_arrive(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temp_dir:
+            auth_store = AuthStore(Path(temp_dir) / "auth.sqlite3")
+            callback_port = _free_port()
+            with _oauth_server() as oauth_url:
+                provider = OAuthProviderSettings(
+                    name="demo_oauth",
+                    client_id="client-id",
+                    authorization_url=f"{oauth_url}/authorize",
+                    token_url=f"{oauth_url}/token",
+                    redirect_uri=f"http://127.0.0.1:{callback_port}/oauth/callback",
+                    scopes=("calendar.readonly",),
+                )
+                oauth_manager = OAuthManager(
+                    (provider,),
+                    auth_store,
+                    browser_opener=lambda url: True,
+                    input_reader=lambda prompt: "authorization-code",
+                    timeout_seconds=3,
+                )
+
+                with redirect_stdout(StringIO()):
+                    token = oauth_manager.access_token("demo_oauth")
+                stored = auth_store.get_token("demo_oauth")
+
+        self.assertEqual(token, _HttpMcpHandler.required_token)
+        self.assertIsNotNone(stored)
+        assert stored is not None
+        self.assertEqual(stored.refresh_token, "refresh-token")
+
     def test_http_mcp_tool_is_registered_from_settings(self) -> None:
         with _http_mcp_server() as server_url:
             with TemporaryDirectory() as temp_dir:

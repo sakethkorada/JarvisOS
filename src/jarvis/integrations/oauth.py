@@ -6,6 +6,7 @@ import base64
 import hashlib
 import json
 import secrets
+import time
 import webbrowser
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -20,6 +21,7 @@ from jarvis.storage.auth import AuthStore, OAuthTokenRecord
 
 
 BrowserOpener = Callable[[str], bool]
+InputReader = Callable[[str], str]
 
 
 @dataclass(frozen=True)
@@ -39,11 +41,13 @@ class OAuthManager:
         providers: tuple[OAuthProviderSettings, ...],
         auth_store: AuthStore,
         browser_opener: BrowserOpener | None = None,
+        input_reader: InputReader | None = None,
         timeout_seconds: int = 180,
     ) -> None:
         self._providers = {provider.name: provider for provider in providers}
         self._auth_store = auth_store
         self._browser_opener = browser_opener or webbrowser.open
+        self._input_reader = input_reader or input
         self._timeout_seconds = timeout_seconds
 
     def access_token(
@@ -110,11 +114,19 @@ class OAuthManager:
             print(f"Authorization required for {provider.name}.")
             print("Open this URL to continue:")
             print(auth_url)
+            print("")
+            print(
+                "If the browser says authorization completed but JarvisOS does "
+                "not continue, paste the final redirected URL or authorization "
+                "code here and press Enter."
+            )
             self._browser_opener(auth_url)
-            callback = server.wait()
+            callback = self._wait_for_callback_or_manual(server)
         if callback.error:
             raise RuntimeError(f"OAuth authorization failed: {callback.error}")
-        if callback.code is None or callback.state != state:
+        if callback.code is None or (
+            callback.state is not None and callback.state != state
+        ):
             raise RuntimeError("OAuth authorization returned an invalid callback.")
         token_payload = {
             "grant_type": "authorization_code",
@@ -125,6 +137,25 @@ class OAuthManager:
         self._add_client_credentials(provider, token_payload)
         response = _post_form(provider.token_url or "", token_payload)
         return self._store_token_response(provider.name, response)
+
+    def _wait_for_callback_or_manual(
+        self,
+        server: "_LocalCallbackServer",
+    ) -> OAuthCallbackResult:
+        manual = _ManualCodeReader(self._input_reader)
+        manual.start()
+        deadline = time.monotonic() + self._timeout_seconds
+        while time.monotonic() < deadline:
+            callback = server.poll()
+            if callback is not None:
+                return callback
+            manual_result = manual.poll()
+            if manual_result is not None:
+                return manual_result
+            time.sleep(0.25)
+        raise RuntimeError(
+            "Timed out waiting for OAuth authorization callback or pasted code."
+        )
 
     def _store_token_response(
         self,
@@ -200,11 +231,11 @@ class _LocalCallbackServer:
         self._server.server_close()
         self._thread.join(timeout=2)
 
-    def wait(self) -> OAuthCallbackResult:
-        """Wait for the OAuth redirect."""
-        if not self._event.wait(self._timeout_seconds):
-            raise RuntimeError("Timed out waiting for OAuth authorization callback.")
-        return self._result
+    def poll(self) -> OAuthCallbackResult | None:
+        """Return the OAuth redirect result if it has arrived."""
+        if self._event.is_set():
+            return self._result
+        return None
 
     def _handler(self) -> type[BaseHTTPRequestHandler]:
         parent = self
@@ -233,6 +264,46 @@ class _LocalCallbackServer:
                 return
 
         return CallbackHandler
+
+
+class _ManualCodeReader:
+    """Background reader for pasted OAuth redirect URLs or codes."""
+
+    def __init__(self, input_reader: InputReader) -> None:
+        self._input_reader = input_reader
+        self._event = Event()
+        self._result: OAuthCallbackResult | None = None
+        self._thread = Thread(target=self._read, daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def poll(self) -> OAuthCallbackResult | None:
+        if self._event.is_set():
+            return self._result
+        return None
+
+    def _read(self) -> None:
+        try:
+            value = self._input_reader("> ").strip()
+        except (EOFError, OSError):
+            return
+        if not value:
+            return
+        self._result = _callback_from_manual_input(value)
+        self._event.set()
+
+
+def _callback_from_manual_input(value: str) -> OAuthCallbackResult:
+    parsed = urlparse(value)
+    if parsed.scheme and parsed.netloc:
+        values = parse_qs(parsed.query)
+        return OAuthCallbackResult(
+            code=_first(values.get("code")),
+            state=_first(values.get("state")),
+            error=_first(values.get("error")),
+        )
+    return OAuthCallbackResult(code=value)
 
 
 def _post_form(url: str, payload: dict[str, str]) -> dict[str, Any]:

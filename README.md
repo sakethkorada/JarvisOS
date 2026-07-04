@@ -360,6 +360,8 @@ When an HTTP MCP server has `auth_provider`, JarvisOS can start an OAuth
 authorization-code + PKCE flow on first use. It prints and opens the provider
 sign-in URL, listens on the configured local `redirect_uri`, stores the returned
 tokens, and refreshes expired access tokens when a refresh token is available.
+If the browser reports success but the terminal does not continue, paste the
+final redirected URL or authorization code back into the waiting terminal prompt.
 
 Manual bearer auth is still available as an escape hatch:
 
