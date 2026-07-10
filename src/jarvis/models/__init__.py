@@ -2,6 +2,7 @@
 
 from jarvis.models.router import (
     FakeModelProvider,
+    GeminiProvider,
     ModelProvider,
     ModelRouter,
     OllamaProvider,
@@ -10,6 +11,7 @@ from jarvis.models.router import (
 
 __all__ = [
     "FakeModelProvider",
+    "GeminiProvider",
     "ModelProvider",
     "ModelRouter",
     "OllamaProvider",

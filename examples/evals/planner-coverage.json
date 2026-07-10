@@ -1,0 +1,74 @@
+{
+  "name": "planner-compound-coverage",
+  "description": "Planner-only checks that compound requests cover every explicitly requested available information source.",
+  "cases": [
+    {
+      "id": "calendar-and-gmail-meeting-context",
+      "kind": "planner",
+      "goal": "Review my upcoming calendar items and find related recent Gmail messages, then summarize the useful context.",
+      "expected_tools": ["google_calendar.list_events"],
+      "expected_tool_groups": [["gmail.list_recent", "gmail.search_messages"]],
+      "forbidden_tools": ["task.breakdown", "task.create_summary"],
+      "max_steps": 4
+    },
+    {
+      "id": "calendar-gmail-spotify-briefing",
+      "kind": "planner",
+      "goal": "Check my upcoming calendar, recent Gmail messages, and recently played Spotify tracks, then give me one concise summary.",
+      "expected_tools": ["google_calendar.list_events", "spotify.recently_played"],
+      "expected_tool_groups": [["gmail.list_recent", "gmail.search_messages"]],
+      "forbidden_tools": ["task.breakdown", "task.create_summary"],
+      "max_steps": 5
+    },
+    {
+      "id": "gmail-and-spotify-recent-activity",
+      "kind": "planner",
+      "goal": "Show my recent Gmail messages and recently played Spotify tracks.",
+      "expected_tools": ["spotify.recently_played"],
+      "expected_tool_groups": [["gmail.list_recent", "gmail.search_messages"]],
+      "forbidden_tools": ["task.breakdown", "task.create_summary"],
+      "max_steps": 3
+    },
+    {
+      "id": "calendar-and-notes-meeting-context",
+      "kind": "planner",
+      "goal": "Find my upcoming calendar events and notes about Jordan for meeting context.",
+      "expected_tools": ["google_calendar.list_events"],
+      "expected_tool_groups": [["notes.search"]],
+      "forbidden_tools": ["task.breakdown", "task.create_summary"],
+      "max_steps": 4
+    },
+    {
+      "id": "calendar-list-with-current-context",
+      "kind": "planner",
+      "goal": "What events do I have in the next week?",
+      "expected_tools": ["google_calendar.list_events"],
+      "forbidden_tools": ["task.breakdown", "task.create_summary"],
+      "max_steps": 3
+    },
+    {
+      "id": "gmail-recent-read-only",
+      "kind": "planner",
+      "goal": "List my five most recent Gmail messages.",
+      "expected_tools": ["gmail.list_recent"],
+      "forbidden_tools": ["task.breakdown", "task.create_summary"],
+      "max_steps": 2
+    },
+    {
+      "id": "spotify-recent-read-only",
+      "kind": "planner",
+      "goal": "What are the five most recent tracks I played on Spotify?",
+      "expected_tools": ["spotify.recently_played"],
+      "forbidden_tools": ["task.breakdown", "task.create_summary"],
+      "max_steps": 2
+    },
+    {
+      "id": "gmail-search-for-person",
+      "kind": "planner",
+      "goal": "Search Gmail for recent messages from Jordan.",
+      "expected_tools": ["gmail.search_messages"],
+      "forbidden_tools": ["task.breakdown", "task.create_summary"],
+      "max_steps": 2
+    }
+  ]
+}

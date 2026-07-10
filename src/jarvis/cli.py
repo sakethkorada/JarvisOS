@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
 from typing import Any
@@ -12,8 +13,16 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from jarvis.agents import default_agent_registry
-from jarvis.contracts import ApprovalRecord, MemoryRecord, TaskRecord
+from jarvis.contracts import (
+    ApprovalRecord,
+    MemoryRecord,
+    TaskRecord,
+    ToolCall,
+    ToolExecutionContext,
+)
+from jarvis.evals import load_eval_suite, run_eval_suite
 from jarvis.models import default_model_router
+from jarvis.policies import PolicyEngine
 from jarvis.runtime import (
     create_default_approval_store,
     create_default_orchestrator,
@@ -22,6 +31,7 @@ from jarvis.runtime import (
     create_default_trace_store,
 )
 from jarvis.settings import load_settings
+from jarvis.integrations.oauth import OAuthManager
 from jarvis.storage.approvals import apply_approved_record
 from jarvis.storage.auth import AuthStore
 from jarvis.storage.memory import MemoryStore
@@ -80,7 +90,46 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Path to a JarvisOS TOML config file.",
     )
-    subparsers.add_parser("models", help="List available model providers.")
+    tool_parser = subparsers.add_parser("tool", help="Debug one registered tool.")
+    tool_subparsers = tool_parser.add_subparsers(
+        dest="tool_command",
+        required=True,
+    )
+    tool_call = tool_subparsers.add_parser(
+        "call",
+        help="Call one registered tool with explicit JSON arguments.",
+    )
+    tool_call.add_argument("tool_name", help="Registered tool name to call.")
+    tool_call.add_argument(
+        "--args-json",
+        default="{}",
+        help="JSON object of tool arguments.",
+    )
+    tool_call.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the full structured tool result as JSON.",
+    )
+    tool_call.add_argument("--model", help="Model provider for contextual tools.")
+    tool_call.add_argument(
+        "--mode",
+        default="balanced",
+        help="Model routing mode for contextual tools.",
+    )
+    tool_call.add_argument(
+        "--config",
+        type=Path,
+        help="Path to a JarvisOS TOML config file.",
+    )
+    models_parser = subparsers.add_parser(
+        "models",
+        help="List available model providers.",
+    )
+    models_parser.add_argument(
+        "--config",
+        type=Path,
+        help="Path to a JarvisOS TOML config file.",
+    )
     settings_parser = subparsers.add_parser("settings", help="Show resolved settings.")
     settings_parser.add_argument(
         "--config",
@@ -197,6 +246,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     auth_list = auth_subparsers.add_parser("list", help="List stored auth tokens.")
     auth_list.add_argument("--config", type=Path, help="Path to config.")
+    auth_connect = auth_subparsers.add_parser(
+        "connect",
+        help="Run OAuth authorization for a configured provider.",
+    )
+    auth_connect.add_argument("provider", help="Provider name from config.")
+    auth_connect.add_argument("--config", type=Path, help="Path to config.")
+    auth_connect.add_argument(
+        "--force",
+        action="store_true",
+        help="Force a new authorization even when a token is already stored.",
+    )
     auth_set = auth_subparsers.add_parser(
         "set-token",
         help="Store a bearer access token for an OAuth provider.",
@@ -220,6 +280,41 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Print debug metadata as JSON.",
     )
     auth_debug.add_argument("--config", type=Path, help="Path to config.")
+
+    evals_parser = subparsers.add_parser(
+        "evals",
+        help="Run planner and ToolUseAgent evaluation suites.",
+    )
+    evals_subparsers = evals_parser.add_subparsers(
+        dest="evals_command",
+        required=True,
+    )
+    evals_run = evals_subparsers.add_parser(
+        "run",
+        help="Run an eval suite without executing provider tools.",
+    )
+    evals_run.add_argument("suite_path", type=Path, help="Path to eval suite JSON.")
+    evals_run.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the full structured eval report as JSON.",
+    )
+    evals_run.add_argument(
+        "--include-raw",
+        action="store_true",
+        help="Include raw model output in the structured report.",
+    )
+    evals_run.add_argument("--model", help="Model provider to evaluate.")
+    evals_run.add_argument(
+        "--mode",
+        default="balanced",
+        help="Model routing mode to resolve from settings.",
+    )
+    evals_run.add_argument(
+        "--config",
+        type=Path,
+        help="Path to a JarvisOS TOML config file.",
+    )
     return parser
 
 
@@ -230,11 +325,10 @@ def main() -> None:
 
     if args.command == "run":
         settings = load_settings(args.config)
-        model_name = settings.resolve_model(args.model, mode=args.mode)
         try:
             result = create_default_orchestrator(settings).run(
                 args.goal,
-                model_name=model_name,
+                model_name=args.model,
                 model_mode=args.mode,
             )
         except KeyError as exc:
@@ -263,8 +357,43 @@ def main() -> None:
             )
         return
 
+    if args.command == "tool":
+        settings = load_settings(args.config)
+        registry = create_default_tool_registry(settings)
+        try:
+            tool = registry.get(args.tool_name)
+        except KeyError as exc:
+            parser.error(str(exc))
+            return
+        decision = PolicyEngine().evaluate(tool)
+        if not decision.allowed:
+            parser.error(f"{args.tool_name} blocked: {decision.reason}")
+            return
+        try:
+            arguments = _parse_args_json(args.args_json)
+        except ValueError as exc:
+            parser.error(str(exc))
+            return
+        context = ToolExecutionContext(
+            goal=f"Direct tool call: {args.tool_name}",
+            model_name=args.model,
+            model_mode=args.mode,
+            models=default_model_router(settings),
+        )
+        result = registry.execute(
+            ToolCall(args.tool_name, arguments),
+            context=context,
+        )
+        if args.json:
+            print(json.dumps(result, default=_json_default, indent=2))
+        else:
+            _print_tool_result(result.output)
+            if not result.success and result.error:
+                print(f"ERROR: {result.error}")
+        return
+
     if args.command == "models":
-        for model_name in default_model_router(load_settings()).list():
+        for model_name in default_model_router(load_settings(args.config)).list():
             print(model_name)
         return
 
@@ -384,6 +513,20 @@ def main() -> None:
                     f"refresh_token={refresh} expires_at={expires}"
                 )
             return
+        if args.auth_command == "connect":
+            manager = OAuthManager(settings.auth.oauth_providers, auth_store)
+            token = manager.access_token(args.provider, force_authorize=args.force)
+            if token is None:
+                parser.error(f"Unknown OAuth provider: {args.provider}")
+                return
+            record = auth_store.get_token(args.provider)
+            refresh = "yes" if record and record.refresh_token else "no"
+            expires = record.expires_at if record else "unknown"
+            print(
+                f"{args.provider}: token=stored "
+                f"refresh_token={refresh} expires_at={expires}"
+            )
+            return
         if args.auth_command == "set-token":
             record = auth_store.set_token(
                 args.provider,
@@ -406,6 +549,22 @@ def main() -> None:
                 _print_auth_debug(debug)
             return
 
+    if args.command == "evals":
+        settings = load_settings(args.config)
+        suite = load_eval_suite(args.suite_path)
+        report = run_eval_suite(
+            suite=suite,
+            settings=settings,
+            model_name=args.model,
+            model_mode=args.mode,
+            include_raw=args.include_raw,
+        )
+        if args.json:
+            print(json.dumps(report, default=_json_default, indent=2))
+        else:
+            _print_eval_report(report)
+        return
+
     parser.error(f"Unknown command: {args.command}")
 
 
@@ -413,6 +572,26 @@ def _print_memory_record(record: MemoryRecord) -> None:
     """Print one memory record in a compact CLI format."""
     print(f"{record.id} [{record.type}] {record.content}")
     print(f"  source={record.source} updated_at={record.updated_at}")
+
+
+def _parse_args_json(value: str) -> dict[str, Any]:
+    """Parse CLI JSON arguments for direct tool calls."""
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"--args-json must be valid JSON: {exc}") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError("--args-json must decode to a JSON object.")
+    return parsed
+
+
+def _print_tool_result(output: dict[str, Any]) -> None:
+    """Print direct tool-call output in a readable form."""
+    text = output.get("text")
+    if isinstance(text, str) and text.strip():
+        print(text)
+        return
+    print(json.dumps(output, default=_json_default, indent=2))
 
 
 def _print_task_record(record: TaskRecord, verbose: bool = False) -> None:
@@ -476,6 +655,7 @@ def _auth_debug(
     debug: dict[str, Any] = {
         "provider": provider_name,
         "auth_database_path": settings.auth.database_path,
+        "auth_profile_path": settings.auth.loaded_from,
         "provider_configured": provider is not None,
         "token_stored": record is not None,
         "refresh_token_stored": bool(record and record.refresh_token),
@@ -484,6 +664,13 @@ def _auth_debug(
         "configured_scopes": list(provider.scopes) if provider else [],
         "tokeninfo": None,
     }
+    if provider is not None:
+        debug["client_secret_env"] = provider.client_secret_env
+        debug["client_secret_present"] = (
+            bool(os.getenv(provider.client_secret_env))
+            if provider.client_secret_env
+            else None
+        )
     if provider is None or record is None:
         return debug
 
@@ -595,9 +782,14 @@ def _print_auth_debug(debug: dict[str, Any]) -> None:
     """Print redacted OAuth debug information."""
     print(f"Provider: {debug['provider']}")
     print(f"Configured: {_yes_no(debug['provider_configured'])}")
+    if debug.get("auth_profile_path"):
+        print(f"Auth profile: {debug['auth_profile_path']}")
     print(f"Auth database: {debug['auth_database_path']}")
     print(f"Token stored: {_yes_no(debug['token_stored'])}")
     print(f"Refresh token stored: {_yes_no(debug['refresh_token_stored'])}")
+    if debug.get("client_secret_env"):
+        print(f"Client secret env: {debug['client_secret_env']}")
+        print(f"Client secret present: {_yes_no(debug['client_secret_present'])}")
     print(f"Expires at: {debug['expires_at'] or 'unknown'}")
     expired = debug["token_expired"]
     print(f"Token expired: {'unknown' if expired is None else _yes_no(expired)}")
@@ -635,3 +827,25 @@ def _print_auth_debug(debug: dict[str, Any]) -> None:
 
 def _yes_no(value: bool) -> str:
     return "yes" if value else "no"
+
+
+def _print_eval_report(report: Any) -> None:
+    """Print an eval report in a compact terminal format."""
+    model = report.model_name or "default"
+    print(f"Eval suite: {report.suite_name}")
+    print(f"Model: {model} mode={report.mode}")
+    print(
+        f"Summary: {report.passed} passed, {report.failed} failed, "
+        f"score={report.score:.2f}"
+    )
+    for result in report.results:
+        status = "PASS" if result.passed else "FAIL"
+        print(f"- {status} {result.id} [{result.kind}] {result.latency_ms:.1f}ms")
+        if result.actual_tools:
+            print(f"  tools={', '.join(result.actual_tools)}")
+        if result.actual_arguments:
+            print(f"  args={json.dumps(result.actual_arguments, sort_keys=True)}")
+        if result.source:
+            print(f"  source={result.source}")
+        for error in result.errors:
+            print(f"  error={error}")

@@ -1,0 +1,54 @@
+# Local FastMCP Gmail config for JarvisOS.
+# Requires FastMCP in the active environment:
+# uv pip install fastmcp
+#
+# Before using this server, authenticate Google through JarvisOS once so your
+# global auth profile points at a stored provider token with Gmail read scope:
+# python -m jarvis auth debug google
+#
+# The MCP subprocess uses the global JarvisOS auth profile by default, so this
+# config only enables the Gmail tools. Set JARVIS_AUTH_PROFILE or add [auth] to
+# jarvis.toml/.jarvis/auth.toml when provider metadata is needed.
+
+[[mcp.servers]]
+name = "gmail"
+command = "python"
+args = [
+  "examples/mcp/google_gmail_fastmcp_server.py",
+  "--provider",
+  "google",
+]
+risk_level = "low"
+requires_approval = false
+
+[[mcp.servers.tools]]
+name = "list_recent"
+argument_hints = """
+Use max_results between 5 and 10 unless the user asks for a different count.
+Use label_ids only when the user names labels such as inbox, important, or sent.
+"""
+risk_level = "low"
+requires_approval = false
+
+[[mcp.servers.tools]]
+name = "search_messages"
+argument_hints = """
+Use Gmail search syntax in query.
+For recent mail, prefer newer_than:30d.
+For a named person, include their name or email in the query.
+Use max_results between 5 and 10 unless specified.
+"""
+risk_level = "low"
+requires_approval = false
+
+[[mcp.servers.tools]]
+name = "get_message"
+argument_hints = "Use this only when a prior result supplied a message id."
+risk_level = "low"
+requires_approval = false
+
+[[mcp.servers.tools]]
+name = "get_thread"
+argument_hints = "Use this only when a prior result supplied a thread id."
+risk_level = "low"
+requires_approval = false

@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import subprocess
 import sys
+import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from jarvis.contracts import ToolSpec
+from jarvis.contracts import ToolCapability, ToolSpec
 from jarvis.integrations.oauth import OAuthManager
 from jarvis.settings import McpServerSettings
 from jarvis.storage.auth import AuthStore
@@ -225,9 +228,12 @@ class McpSession:
         self,
         process: subprocess.Popen[bytes],
         timeout_seconds: float,
+        stderr_tail: "_StreamTailReader",
     ) -> None:
         self._process = process
         self._timeout_seconds = timeout_seconds
+        self._stderr_tail = stderr_tail
+        self._reader = _McpStdoutReader(process, stderr_tail)
         self._next_id = 1
 
     def initialize(self) -> None:
@@ -258,8 +264,23 @@ class McpSession:
                 "params": params,
             },
         )
+        deadline = time.monotonic() + self._timeout_seconds
         while True:
-            message = _read_message(self._process)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                detail = self._stderr_tail.detail()
+                raise RuntimeError(
+                    f"MCP stdio request timed out after "
+                    f"{self._timeout_seconds:g} seconds waiting for {method}."
+                    f"{detail}"
+                )
+            try:
+                message = self._reader.read(remaining)
+            except RuntimeError as exc:
+                if "did not respond before timeout" not in str(exc):
+                    raise
+                detail = self._stderr_tail.detail()
+                raise RuntimeError(f"{exc}{detail}") from exc
             if message.get("id") != request_id:
                 continue
             error = message.get("error")
@@ -289,6 +310,7 @@ class _mcp_process:
         self._server = server
         self._timeout_seconds = timeout_seconds
         self._process: subprocess.Popen[bytes] | None = None
+        self._stderr_tail: _StreamTailReader | None = None
 
     def __enter__(self) -> McpSession:
         self._process = subprocess.Popen(
@@ -297,7 +319,12 @@ class _mcp_process:
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
         )
-        return McpSession(self._process, self._timeout_seconds)
+        self._stderr_tail = _StreamTailReader(self._process.stderr)
+        return McpSession(
+            self._process,
+            self._timeout_seconds,
+            self._stderr_tail,
+        )
 
     def __exit__(self, exc_type, exc, traceback) -> None:
         if self._process is None:
@@ -315,6 +342,78 @@ class _mcp_process:
         ):
             if pipe is not None:
                 pipe.close()
+
+
+class _McpStdoutReader:
+    """Background reader that lets stdio MCP requests enforce timeouts."""
+
+    def __init__(
+        self,
+        process: subprocess.Popen[bytes],
+        stderr_tail: "_StreamTailReader",
+    ) -> None:
+        self._process = process
+        self._stderr_tail = stderr_tail
+        self._messages: queue.Queue[dict[str, Any] | BaseException] = queue.Queue()
+        self._thread = threading.Thread(target=self._read_loop, daemon=True)
+        self._thread.start()
+
+    def read(self, timeout_seconds: float) -> dict[str, Any]:
+        """Read one decoded MCP message or raise when the timeout expires."""
+        try:
+            item = self._messages.get(timeout=timeout_seconds)
+        except queue.Empty as exc:
+            raise RuntimeError(
+                "MCP stdio server did not respond before timeout."
+            ) from exc
+        if isinstance(item, BaseException):
+            raise item
+        return item
+
+    def _read_loop(self) -> None:
+        while True:
+            try:
+                self._messages.put(_read_message(self._process, self._stderr_tail))
+            except BaseException as exc:
+                self._messages.put(exc)
+                return
+
+
+class _StreamTailReader:
+    """Continuously drains a byte stream and stores a bounded text tail."""
+
+    def __init__(self, stream, max_chars: int = 2000) -> None:
+        self._stream = stream
+        self._max_chars = max_chars
+        self._tail = ""
+        self._lock = threading.Lock()
+        self._thread = threading.Thread(target=self._read_loop, daemon=True)
+        self._thread.start()
+
+    def detail(self, wait_seconds: float = 0) -> str:
+        """Return a formatted stderr tail, if any text has been captured."""
+        deadline = time.monotonic() + wait_seconds
+        while wait_seconds and time.monotonic() < deadline:
+            with self._lock:
+                if self._tail.strip():
+                    break
+            time.sleep(0.01)
+        with self._lock:
+            tail = self._tail.strip()
+        if not tail:
+            return ""
+        return f" Stderr: {tail[-self._max_chars:]}"
+
+    def _read_loop(self) -> None:
+        if self._stream is None:
+            return
+        while True:
+            chunk = self._stream.readline()
+            if chunk == b"":
+                return
+            decoded = chunk.decode("utf-8", errors="replace")
+            with self._lock:
+                self._tail = (self._tail + decoded)[-self._max_chars :]
 
 
 def load_mcp_tools(
@@ -348,14 +447,17 @@ def load_mcp_tools(
                 mcp_name,
                 jarvis_name,
             )
+            argument_hints = _mcp_tool_argument_hints(server, mcp_name, jarvis_name)
             registry.register(
                 ToolSpec(
                     name=jarvis_name,
                     description=description,
+                    argument_hints=argument_hints,
                     risk_level=risk_level,
                     requires_approval=requires_approval,
                     source=f"mcp:{server.name}",
                     input_schema=_tool_input_schema(tool),
+                    capability=_mcp_tool_capability(server, mcp_name),
                 ),
                 lambda arguments, binding=binding: _execute_mcp_tool(
                     binding,
@@ -381,10 +483,67 @@ def _mcp_tool_policy(
     return risk_level, requires_approval
 
 
+def _mcp_tool_argument_hints(
+    server: McpServerSettings,
+    mcp_name: str,
+    jarvis_name: str,
+) -> str | None:
+    for override in server.tools:
+        if override.name in {mcp_name, jarvis_name} and override.argument_hints:
+            return override.argument_hints
+    return None
+
+
 def _tool_input_schema(tool: dict[str, Any]) -> dict[str, Any] | None:
     schema = tool.get("inputSchema")
     if isinstance(schema, dict):
         return schema
+    return None
+
+
+def _mcp_tool_capability(
+    server: McpServerSettings,
+    mcp_name: str,
+) -> ToolCapability | None:
+    """Infer minimal capability metadata from MCP names."""
+    combined_name = f"{server.name}.{mcp_name}".lower()
+    operation = mcp_name.strip().lower()
+    if "calendar" in combined_name:
+        if operation in {"list_events", "search_events", "get_event"}:
+            return ToolCapability(
+                domain="calendar",
+                operation="list_events" if operation == "search_events" else operation,
+                provider=server.name,
+                read_only=True,
+            )
+        if operation == "list_calendars":
+            return ToolCapability(
+                domain="calendar",
+                operation="list_calendars",
+                provider=server.name,
+                read_only=True,
+            )
+    if "gmail" in combined_name or "email" in combined_name:
+        if operation in {"list_recent", "search_messages", "get_message", "get_thread"}:
+            return ToolCapability(
+                domain="email",
+                operation=operation,
+                provider=server.name,
+                read_only=True,
+            )
+    if "spotify" in combined_name or "music" in combined_name:
+        if operation in {
+            "search",
+            "current_playback",
+            "recently_played",
+            "list_playlists",
+        }:
+            return ToolCapability(
+                domain="music",
+                operation=operation,
+                provider=server.name,
+                read_only=True,
+            )
     return None
 
 
@@ -455,12 +614,15 @@ def _http_error_message(error: HTTPError) -> str:
 
 def _normalize_mcp_result(result: dict[str, Any]) -> dict[str, Any]:
     content = result.get("content", [])
+    text = _content_to_text(content)
     if result.get("isError") is True:
-        message = _content_to_text(content) or "MCP tool returned an error."
+        message = text or "MCP tool returned an error."
         raise RuntimeError(message)
+    if text.startswith("AUTH_ERROR:"):
+        raise RuntimeError(text.removeprefix("AUTH_ERROR:").strip())
     return {
         "mcp_result": result,
-        "text": _content_to_text(content),
+        "text": text,
     }
 
 
@@ -525,13 +687,20 @@ def _write_message(
     process.stdin.flush()
 
 
-def _read_message(process: subprocess.Popen[bytes]) -> dict[str, Any]:
+def _read_message(
+    process: subprocess.Popen[bytes],
+    stderr_tail: _StreamTailReader | None = None,
+) -> dict[str, Any]:
     if process.stdout is None:
         raise RuntimeError("MCP process stdout is unavailable.")
     while True:
         line = process.stdout.readline()
         if line == b"":
-            detail = _process_error_detail(process)
+            detail = (
+                stderr_tail.detail(wait_seconds=0.2)
+                if stderr_tail is not None
+                else _process_error_detail(process)
+            )
             raise RuntimeError(f"MCP process exited before sending a message.{detail}")
         decoded = line.decode("utf-8").strip()
         if not decoded:

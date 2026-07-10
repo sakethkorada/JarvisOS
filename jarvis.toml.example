@@ -7,14 +7,35 @@ balanced = "ollama/llama3.2:3b"
 private = "ollama/llama3.2:3b"
 fast = "ollama/llama3.2:3b"
 
+[models.roles]
+# Optional per-agent-role routes. These let planner/tool-use/synthesis use
+# different local or cloud models without changing agent or tool code.
+planner = "ollama/llama3.2:3b"
+tool_use = "ollama/llama3.2:3b"
+synthesis = "ollama/llama3.2:3b"
+general = "ollama/llama3.2:3b"
+
 [providers.ollama]
 host = "http://localhost:11434"
 models = ["llama3.2:3b"]
+
+[providers.gemini]
+# Add Gemini model IDs here or reference gemini/<model> from [models].
+models = []
+api_key_env = "GEMINI_API_KEY"
+timeout_seconds = 60
 
 [plugins]
 # Plugin paths may point at local custom plugins or plugin folders downloaded by
 # a future installer. Runtime loading treats both the same after they are local.
 paths = ["examples/plugins/demo_notes"]
+
+[capabilities]
+# Built-in capability packs expand to ordinary tools/MCP servers. Enable local
+# Google Calendar + Gmail FastMCP wrappers here after Google OAuth is configured.
+google_workspace = false
+# Enable the local Spotify read-only FastMCP wrapper after Spotify OAuth setup.
+spotify = false
 
 [mcp]
 # MCP servers expose external tools. Read-only servers should usually stay low
@@ -27,10 +48,12 @@ servers = [
 # Omit these to use bundled defaults from src/jarvis/prompts/.
 # Paths are resolved relative to this config file when they are not absolute.
 # planner = "prompts/planner.md"
+# tool_use = "prompts/tool_use.md"
 # synthesis = "prompts/synthesis.md"
 
 [memory]
 database_path = ".jarvis/memory.sqlite3"
+enabled = true
 auto_extract = true
 auto_write = false
 

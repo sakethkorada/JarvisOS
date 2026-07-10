@@ -73,6 +73,34 @@ The orchestrator should not contain special-case branches for specific user
 workflows. Reference workflows such as meeting prep should exercise the same
 public interfaces that user-created workflows use.
 
+The LLM planner should be the primary tool-selection layer for real-model runs.
+Deterministic runtime code should validate plans, enforce policy, normalize
+arguments, record traces, and provide safe generic degradation. It should not
+grow provider, domain, or workflow keyword routing as the normal way to choose
+tools.
+
+If a model misses an obvious tool, prefer improving:
+
+- tool names and descriptions,
+- `ToolSpec` capability metadata,
+- tool input schemas,
+- tool-local argument hints,
+- planner and ToolUseAgent prompts,
+- planner retry or repair behavior,
+- trace-based evaluation and benchmarks.
+
+The planner prompt should still give the model useful context. It may explain
+how to read the tool catalog, what risk and approval fields mean, when to prefer
+read-only tools, and how to produce the expected plan JSON. It may include
+concise descriptions of the tools that are actually registered. That context is
+different from hardcoded routing rules. Tool-specific usage advice should live
+with the tool through descriptions, schemas, capability metadata, and
+argument hints, not as provider-specific branches in planner code.
+
+Do not make fallback planning a shadow orchestrator. Existing keyword-like
+fallbacks should be treated as transitional scaffolding and should be removed or
+generalized when the LLM/tool metadata path can handle the same behavior.
+
 ## 4. Defaults Without Hardcoding
 
 JarvisOS should eventually ship with default capability packs and reference
@@ -118,7 +146,7 @@ Prepare me for my meeting with Jordan tomorrow.
 
 The runtime might discover:
 
-- `calendar.search_events`,
+- `calendar.list_events` or provider-specific MCP calendar tools,
 - `email.search_messages`,
 - `memory.search`,
 - `notes.search`,
@@ -231,10 +259,25 @@ Agents are scoped domain workers. They should be configured with:
 - name,
 - description,
 - allowed tools,
+- execution role,
 - preferred model mode,
+- prompt reference,
 - risk permissions,
 - memory access rules,
 - output expectations.
+
+Agent identity, execution role, and model provider are separate concepts:
+
+```text
+AgentProfile describes who is acting and what constraints apply.
+ExecutionRole describes what kind of model behavior is needed.
+ModelRouter resolves role/mode/user config to a concrete local or API provider.
+```
+
+Do not make an agent directly equal a provider. A user-defined specialist should
+request a role or capability, and the model router should decide whether that
+role is served by Ollama, Gemini, Anthropic, OpenAI, Grok, LM Studio, or another
+provider under the active settings.
 
 Likely default agents over time:
 
@@ -259,6 +302,20 @@ completed unless the trace and tool result support that claim.
 Core agent prompts should live in prompt files or configuration, not hardcoded
 Python constants. Bundled defaults should work without user setup, and user
 overrides should be optional.
+
+Every new agent should include enough metadata for the orchestrator to reason
+about it without hidden code branches:
+
+- a concise purpose statement,
+- the tools or tool domains it may use,
+- default model mode,
+- risk and approval expectations,
+- memory access expectations,
+- output contract or response shape.
+
+Agent descriptions should be written for another model to read. If an agent
+cannot be selected or supervised from its description and permissions, improve
+the metadata before adding routing logic.
 
 ## 10. Tools, Plugins, Skills, and MCP
 
@@ -304,6 +361,29 @@ Later versions can add:
 - reputation or signing mechanisms.
 
 Do not design v1 around a full marketplace.
+
+Every new tool, MCP wrapper, plugin tool, or capability-pack tool should carry
+planner-usable metadata. This is not optional polish; it is how JarvisOS avoids
+hardcoded routing.
+
+Tool quality checklist:
+
+- `name`: stable, specific, and namespaced when provider-backed.
+- `description`: says what the tool actually does, what data it reads or
+  changes, and when it should be selected.
+- `input_schema`: declares valid argument names, required fields, and types.
+- `capability`: declares domain, operation, provider, read-only status, and
+  demo status when known.
+- `risk_level` and `requires_approval`: accurately reflect side effects.
+- `argument_hints`: short selected-tool-only advice for defaults, provider
+  syntax, date handling, ID requirements, and common mistakes.
+- output shape: should expose useful structured fields such as `text`, IDs, or
+  records when possible, so later steps do not have to parse blobs.
+
+Good metadata lets the planner choose tools and lets ToolUseAgent fill
+arguments. Weak metadata should be treated as an integration bug because it
+forces the system back toward brittle prompt guessing or deterministic
+shortcuts.
 
 ## 11. Policies and Approvals
 
@@ -568,6 +648,9 @@ Test deterministic components heavily:
 - memory storage.
 
 Use fake providers and fake tools for normal tests.
+
+Use planner/tool-use eval suites to compare prompt and model quality without
+executing private provider tools.
 
 Integration tests should verify that the CLI can run a complete fake scenario
 without requiring API keys.

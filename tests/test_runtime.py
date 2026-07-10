@@ -1,10 +1,13 @@
 import unittest
 import importlib.util
+import os
+from unittest.mock import patch
 from contextlib import contextmanager, redirect_stdout
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import sys
+import time
 from io import StringIO
 from socket import socket
 from threading import Thread
@@ -12,53 +15,115 @@ import json
 from urllib.parse import parse_qs, urlencode, urlparse
 from urllib.request import urlopen
 
-from jarvis.contracts import ToolCall, ToolExecutionContext, ToolSpec
+from jarvis.contracts import (
+    AvailableTool,
+    ExecutionPlan,
+    ToolCall,
+    ToolCapability,
+    ToolExecutionContext,
+    ToolResult,
+    ToolSpec,
+)
 from jarvis.contracts import ModelRequest, ModelResponse
+from jarvis.evals import EvalCase, EvalSuite, load_eval_suite, run_eval_suite
 from jarvis.errors import ModelProviderError
-from jarvis.models import ModelProvider, ModelRouter
+from jarvis.models import (
+    GeminiProvider,
+    ModelProvider,
+    ModelRouter,
+    default_model_router,
+)
+from jarvis.orchestration.arguments import ArgumentBuilder
+from jarvis.orchestration.arguments import ToolUseAgent, ToolUseFeedback
+from jarvis.orchestration.arguments import resolve_tool_arguments
 from jarvis.orchestration.orchestrator import Orchestrator
 from jarvis.orchestration.planner import Planner
+from jarvis.orchestration.synthesizer import _is_supported_synthesis
 from jarvis.agents import default_agent_registry
+from jarvis.policies import PolicyEngine
 from jarvis.prompts import PromptLibrary
 from jarvis.runtime import create_default_orchestrator
 from jarvis.runtime import create_default_tool_registry
 from jarvis.settings import McpServerSettings, load_settings
 from jarvis.storage.approvals import ApprovalStore, apply_approved_record
 from jarvis.storage.memory import MemoryExtractor, MemoryStore
-from jarvis.integrations.mcp import McpHttpClient, McpStdioClient, _resolved_command
+from jarvis.integrations.mcp import (
+    McpHttpClient,
+    McpStdioClient,
+    _mcp_tool_capability,
+    _resolved_command,
+)
 from jarvis.integrations.oauth import OAuthManager
+from jarvis.integrations.oauth import _post_form
 from jarvis.settings import OAuthProviderSettings
 from jarvis.storage.auth import AuthStore
 from jarvis.storage.tasks import TaskStore
-from jarvis.tools import default_tool_registry
+from jarvis.tools import ToolRegistry, default_tool_registry
 from jarvis.storage.traces import TraceStore
-from jarvis.cli import _auth_debug
+from jarvis.cli import _auth_debug, _parse_args_json, _print_tool_result
+from jarvis.cli import main as cli_main
 
 
 class RuntimeTests(unittest.TestCase):
     """Tests for the default local runtime loop."""
 
     def test_simple_goal_runs(self) -> None:
-        result = create_default_orchestrator().run(
-            "break this task into steps",
-            model_name="fake-local",
-        )
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "jarvis.toml"
+            config_path.write_text("", encoding="utf-8")
+            result = create_default_orchestrator(load_settings(config_path)).run(
+                "break this task into steps",
+                model_name="fake-local",
+            )
 
         self.assertEqual(result.status, "completed")
         self.assertIn("memory.search", [item.tool_name for item in result.step_results])
-        self.assertIn("Goal: break this task into steps", result.final_response)
+        self.assertEqual(result.final_response, "Done.")
         trace_types = [event.event_type for event in result.trace]
         self.assertIn("synthesis.completed", trace_types)
 
-    def test_meeting_goal_uses_calendar_capability(self) -> None:
-        result = create_default_orchestrator().run(
-            "prepare me for my meeting tomorrow",
-            model_name="fake-local",
-        )
+    def test_meeting_goal_degrades_without_calendar_capability(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "jarvis.toml"
+            config_path.write_text("", encoding="utf-8")
+            result = create_default_orchestrator(load_settings(config_path)).run(
+                "prepare me for my meeting tomorrow",
+                model_name="fake-local",
+            )
 
         tool_names = [item.tool_name for item in result.step_results]
         self.assertIn("memory.search", tool_names)
-        self.assertIn("calendar.search_events", tool_names)
+        self.assertNotIn("calendar.search_events", tool_names)
+        self.assertEqual(result.status, "completed")
+
+    def test_memory_can_be_disabled_for_runtime_runs(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "jarvis.toml"
+            config_path.write_text(
+                """
+[memory]
+enabled = false
+auto_extract = true
+""".strip(),
+                encoding="utf-8",
+            )
+            settings = load_settings(config_path)
+            tools = create_default_tool_registry(settings)
+            result = create_default_orchestrator(settings).run(
+                "Break this task into steps.",
+                model_name="fake-local",
+            )
+
+        self.assertFalse(settings.memory.enabled)
+        self.assertFalse(tools.has("memory.search"))
+        self.assertNotIn(
+            "memory.search",
+            [item.tool_name for item in result.step_results],
+        )
+        self.assertNotIn(
+            "memory.suggested",
+            [event.event_type for event in result.trace],
+        )
 
     def test_plugin_notes_tool_runs_when_configured(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -74,16 +139,34 @@ paths = ["{plugin_path.name}"]
             )
 
             settings = load_settings(config_path)
-            result = create_default_orchestrator(settings).run(
-                "find notes about Jordan",
-                model_name="fake-local",
+            provider = StaticModelProvider(
+                """
+{
+  "steps": [
+    {
+      "tool_name": "notes.search",
+      "arguments": {"query": "Jordan"},
+      "description": "Search notes."
+    }
+  ]
+}
+""".strip()
             )
+            result = Orchestrator(
+                agents=default_agent_registry(),
+                tools=create_default_tool_registry(settings),
+                models=ModelRouter({provider.name: provider}, provider.name),
+                policies=PolicyEngine(),
+                planner_prompt=PromptLibrary().planner_prompt(),
+                synthesis_prompt=PromptLibrary().synthesis_prompt(),
+                tool_use_prompt=PromptLibrary().tool_use_prompt(),
+            ).run("find notes about Jordan", model_name=provider.name)
 
         tool_names = [item.tool_name for item in result.step_results]
         self.assertIn("notes.search", tool_names)
         self.assertIn("Jordan meeting", result.final_response)
 
-    def test_meeting_prep_demo_uses_calendar_and_notes(self) -> None:
+    def test_meeting_prep_uses_notes_without_fake_calendar(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             plugin_path = _write_notes_plugin(root)
@@ -97,16 +180,87 @@ paths = ["{plugin_path.name}"]
             )
 
             settings = load_settings(config_path)
-            result = create_default_orchestrator(settings).run(
+            provider = StaticModelProvider(
+                """
+{
+  "steps": [
+    {
+      "tool_name": "notes.search",
+      "arguments": {"query": "Jordan meeting"},
+      "description": "Search notes for meeting context."
+    }
+  ]
+}
+""".strip()
+            )
+            result = Orchestrator(
+                agents=default_agent_registry(),
+                tools=create_default_tool_registry(settings),
+                models=ModelRouter({provider.name: provider}, provider.name),
+                policies=PolicyEngine(),
+                planner_prompt=PromptLibrary().planner_prompt(),
+                synthesis_prompt=PromptLibrary().synthesis_prompt(),
+                tool_use_prompt=PromptLibrary().tool_use_prompt(),
+            ).run(
                 "Prepare me for my meeting with Jordan tomorrow",
-                model_name="fake-local",
+                model_name=provider.name,
             )
 
         tool_names = [item.tool_name for item in result.step_results]
-        self.assertIn("calendar.search_events", tool_names)
+        self.assertNotIn("calendar.search_events", tool_names)
         self.assertIn("notes.search", tool_names)
-        self.assertIn("Jordan project sync", result.final_response)
         self.assertIn("Jordan meeting", result.final_response)
+
+    def test_orchestrator_allows_music_capability_agent(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tools = default_tool_registry(MemoryStore(Path(temp_dir) / "memory.sqlite3"))
+            tools.register(
+                ToolSpec(
+                    name="spotify.recently_played",
+                    description="List recently played Spotify tracks.",
+                    source="mcp:spotify",
+                    input_schema={
+                        "type": "object",
+                        "properties": {"limit": {"type": "integer"}},
+                    },
+                    capability=ToolCapability(
+                        domain="music",
+                        operation="recently_played",
+                        provider="spotify",
+                    ),
+                ),
+                lambda arguments: {"text": "Spotify recently played: test track"},
+            )
+            provider = StaticModelProvider(
+                """
+{
+  "steps": [
+    {
+      "tool_name": "spotify.recently_played",
+      "arguments": {"limit": 10},
+      "description": "Read recently played tracks."
+    }
+  ]
+}
+""".strip()
+            )
+            orchestrator = Orchestrator(
+                agents=default_agent_registry(),
+                tools=tools,
+                models=ModelRouter({provider.name: provider}, provider.name),
+                policies=PolicyEngine(),
+                planner_prompt=PromptLibrary().planner_prompt(),
+                synthesis_prompt=PromptLibrary().synthesis_prompt(),
+                tool_use_prompt=PromptLibrary().tool_use_prompt(),
+            )
+
+            result = orchestrator.run(
+                "Show me my recently played Spotify tracks",
+                model_name=provider.name,
+            )
+
+        self.assertEqual(result.status, "completed")
+        self.assertIn("Spotify recently played: test track", result.final_response)
 
     def test_runtime_memory_search_reads_store(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -184,9 +338,30 @@ database_path = "{task_path.name}"
             )
             settings = load_settings(config_path)
 
-            result = create_default_orchestrator(settings).run(
+            provider = StaticModelProvider(
+                """
+{
+  "steps": [
+    {
+      "tool_name": "task.create",
+      "arguments": {"title": "Ask Jordan about API migration"},
+      "description": "Create a local task."
+    }
+  ]
+}
+""".strip()
+            )
+            result = Orchestrator(
+                agents=default_agent_registry(),
+                tools=create_default_tool_registry(settings),
+                models=ModelRouter({provider.name: provider}, provider.name),
+                policies=PolicyEngine(),
+                planner_prompt=PromptLibrary().planner_prompt(),
+                synthesis_prompt=PromptLibrary().synthesis_prompt(),
+                tool_use_prompt=PromptLibrary().tool_use_prompt(),
+            ).run(
                 "Create a task to ask Jordan about API migration",
-                model_name="fake-local",
+                model_name=provider.name,
             )
             tasks = TaskStore(settings.tasks.database_path).list()
 
@@ -208,10 +383,31 @@ database_path = "tasks.sqlite3"
             )
             settings = load_settings(config_path)
 
-            create_default_orchestrator(settings).run(
+            provider = StaticModelProvider(
+                """
+{
+  "steps": [
+    {
+      "tool_name": "task.create",
+      "arguments": {"title": "Ask Jordan about API migration"},
+      "description": "Create a local task."
+    }
+  ]
+}
+""".strip()
+            )
+            Orchestrator(
+                agents=default_agent_registry(),
+                tools=create_default_tool_registry(settings),
+                models=ModelRouter({provider.name: provider}, provider.name),
+                policies=PolicyEngine(),
+                planner_prompt=PromptLibrary().planner_prompt(),
+                synthesis_prompt=PromptLibrary().synthesis_prompt(),
+                tool_use_prompt=PromptLibrary().tool_use_prompt(),
+            ).run(
                 "Prepare me for my meeting with Jordan tomorrow and "
                 "create a task to ask Jordan about API migration",
-                model_name="fake-local",
+                model_name=provider.name,
             )
             tasks = TaskStore(settings.tasks.database_path).list()
 
@@ -270,6 +466,39 @@ private = "ollama/llama3.2:3b"
             "ollama/llama3.2:3b",
         )
         self.assertEqual(settings.resolve_model(None, "balanced"), "fake-local")
+
+    def test_role_model_resolution_precedence(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "jarvis.toml"
+            config_path.write_text(
+                """
+[models]
+default = "fake-local"
+
+[models.modes]
+balanced = "mode-model"
+
+[models.roles]
+planner = "planner-model"
+tool_use = "tool-use-model"
+""".strip(),
+                encoding="utf-8",
+            )
+
+            settings = load_settings(config_path)
+
+        self.assertEqual(
+            settings.resolve_model("manual-model", "balanced", role="planner"),
+            "manual-model",
+        )
+        self.assertEqual(
+            settings.resolve_model(None, "balanced", role="planner"),
+            "planner-model",
+        )
+        self.assertEqual(
+            settings.resolve_model(None, "balanced", role="missing"),
+            "mode-model",
+        )
 
     def test_resolves_plugin_paths_relative_to_config(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -417,7 +646,7 @@ scopes = ["https://www.googleapis.com/auth/calendar.events.readonly"]
 [[mcp.servers]]
 name = "google_calendar"
 transport = "http"
-url = "https://calendarmcp.googleapis.com/mcp/v1"
+url = "https://mcp.example.com/mcp"
 auth_provider = "google"
 bearer_token_env = "GOOGLE_MCP_ACCESS_TOKEN"
 
@@ -444,10 +673,96 @@ X-Test = "1"
         )
         server = settings.mcp.servers[0]
         self.assertEqual(server.transport, "http")
-        self.assertEqual(server.url, "https://calendarmcp.googleapis.com/mcp/v1")
+        self.assertEqual(server.url, "https://mcp.example.com/mcp")
         self.assertEqual(server.auth_provider, "google")
         self.assertEqual(server.bearer_token_env, "GOOGLE_MCP_ACCESS_TOKEN")
         self.assertEqual(server.headers["X-Test"], "1")
+
+    def test_non_auth_config_inherits_global_auth_profile(self) -> None:
+        previous_profile = os.environ.get("JARVIS_AUTH_PROFILE")
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            auth_profile = root / "auth.toml"
+            auth_profile.write_text(
+                """
+[auth]
+database_path = "state/auth.sqlite3"
+
+[[auth.oauth_providers]]
+name = "google"
+client_id = "client-id"
+client_secret_env = "GOOGLE_CLIENT_SECRET"
+authorization_url = "https://accounts.google.com/o/oauth2/v2/auth"
+token_url = "https://oauth2.googleapis.com/token"
+redirect_uri = "http://localhost:8765/oauth/callback"
+scopes = ["https://www.googleapis.com/auth/calendar.events.readonly"]
+""".strip(),
+                encoding="utf-8",
+            )
+            tool_config = root / "calendar-tools.toml"
+            tool_config.write_text(
+                """
+[[mcp.servers]]
+name = "google_calendar"
+command = "python"
+args = ["calendar_server.py"]
+""".strip(),
+                encoding="utf-8",
+            )
+            os.environ["JARVIS_AUTH_PROFILE"] = str(auth_profile)
+
+            settings = load_settings(tool_config)
+
+        if previous_profile is None:
+            os.environ.pop("JARVIS_AUTH_PROFILE", None)
+        else:
+            os.environ["JARVIS_AUTH_PROFILE"] = previous_profile
+        self.assertEqual(
+            settings.auth.database_path,
+            Path(temp_dir) / "state" / "auth.sqlite3",
+        )
+        self.assertEqual(settings.auth.oauth_providers[0].name, "google")
+        self.assertEqual(settings.auth.loaded_from, auth_profile)
+
+    def test_local_auth_overrides_global_auth_profile(self) -> None:
+        previous_profile = os.environ.get("JARVIS_AUTH_PROFILE")
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            auth_profile = root / "auth.toml"
+            auth_profile.write_text(
+                """
+[auth]
+database_path = "global/auth.sqlite3"
+
+[[auth.oauth_providers]]
+name = "global"
+""".strip(),
+                encoding="utf-8",
+            )
+            config_path = root / "jarvis.toml"
+            config_path.write_text(
+                """
+[auth]
+database_path = "local/auth.sqlite3"
+
+[[auth.oauth_providers]]
+name = "local"
+""".strip(),
+                encoding="utf-8",
+            )
+            os.environ["JARVIS_AUTH_PROFILE"] = str(auth_profile)
+
+            settings = load_settings(config_path)
+
+        if previous_profile is None:
+            os.environ.pop("JARVIS_AUTH_PROFILE", None)
+        else:
+            os.environ["JARVIS_AUTH_PROFILE"] = previous_profile
+        self.assertEqual(
+            settings.auth.database_path,
+            Path(temp_dir) / "local" / "auth.sqlite3",
+        )
+        self.assertEqual(settings.auth.oauth_providers[0].name, "local")
 
     def test_loads_mcp_tool_policy_overrides_from_toml(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -464,6 +779,7 @@ requires_approval = false
 
 [[mcp.servers.tools]]
 name = "echo"
+argument_hints = "Pass the user's exact text in the text argument."
 risk_level = "medium"
 requires_approval = true
 """.strip(),
@@ -475,8 +791,147 @@ requires_approval = true
         server = settings.mcp.servers[0]
         self.assertEqual(len(server.tools), 1)
         self.assertEqual(server.tools[0].name, "echo")
+        self.assertEqual(
+            server.tools[0].argument_hints,
+            "Pass the user's exact text in the text argument.",
+        )
         self.assertEqual(server.tools[0].risk_level, "medium")
         self.assertTrue(server.tools[0].requires_approval)
+
+    def test_enables_google_workspace_capability_pack(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "jarvis.toml"
+            config_path.write_text(
+                """
+[capabilities]
+google_workspace = true
+""".strip(),
+                encoding="utf-8",
+            )
+
+            settings = load_settings(config_path)
+
+        self.assertTrue(settings.capabilities.is_enabled("google_workspace"))
+        servers = {server.name: server for server in settings.mcp.servers}
+        self.assertIn("google_calendar", servers)
+        self.assertIn("gmail", servers)
+        self.assertEqual(
+            servers["google_calendar"].args,
+            ("examples/mcp/google_calendar_fastmcp_server.py",),
+        )
+        self.assertEqual(
+            servers["gmail"].args,
+            ("examples/mcp/google_gmail_fastmcp_server.py",),
+        )
+        self.assertEqual(
+            {tool.name for tool in servers["gmail"].tools},
+            {"list_recent", "search_messages", "get_message", "get_thread"},
+        )
+        self.assertIn(
+            "Gmail search syntax",
+            next(
+                tool.argument_hints
+                for tool in servers["gmail"].tools
+                if tool.name == "search_messages"
+            ),
+        )
+
+    def test_enables_spotify_capability_pack(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "jarvis.toml"
+            config_path.write_text(
+                """
+[capabilities]
+spotify = true
+""".strip(),
+                encoding="utf-8",
+            )
+
+            settings = load_settings(config_path)
+
+        self.assertTrue(settings.capabilities.is_enabled("spotify"))
+        servers = {server.name: server for server in settings.mcp.servers}
+        self.assertIn("spotify", servers)
+        self.assertEqual(
+            servers["spotify"].args,
+            ("examples/mcp/spotify_fastmcp_server.py",),
+        )
+        self.assertEqual(
+            {tool.name for tool in servers["spotify"].tools},
+            {"search", "current_playback", "recently_played", "list_playlists"},
+        )
+        self.assertIn(
+            "Spotify catalog query",
+            next(
+                tool.argument_hints
+                for tool in servers["spotify"].tools
+                if tool.name == "search"
+            ),
+        )
+
+    def test_disabled_capability_pack_does_not_add_mcp_servers(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "jarvis.toml"
+            config_path.write_text(
+                """
+[capabilities]
+google_workspace = false
+""".strip(),
+                encoding="utf-8",
+            )
+
+            settings = load_settings(config_path)
+
+        self.assertFalse(settings.capabilities.is_enabled("google_workspace"))
+        self.assertEqual(settings.mcp.servers, ())
+
+    def test_configured_mcp_server_overrides_capability_pack_server(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "jarvis.toml"
+            config_path.write_text(
+                """
+[capabilities]
+google_workspace = true
+
+[[mcp.servers]]
+name = "gmail"
+command = "python"
+args = ["custom_gmail.py"]
+""".strip(),
+                encoding="utf-8",
+            )
+
+            settings = load_settings(config_path)
+
+        servers = {server.name: server for server in settings.mcp.servers}
+        gmail_servers = [
+            server for server in settings.mcp.servers if server.name == "gmail"
+        ]
+        self.assertEqual(len(gmail_servers), 1)
+        self.assertIn("google_calendar", servers)
+        self.assertEqual(servers["gmail"].args, ("custom_gmail.py",))
+
+    def test_unknown_capability_pack_fails_cleanly(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            config_path = root / "jarvis.toml"
+            config_path.write_text(
+                """
+[capabilities]
+not_real = true
+""".strip(),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "Unknown built-in capability pack",
+            ):
+                load_settings(config_path)
 
     def test_loads_prompt_override_paths_from_toml(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -487,6 +942,7 @@ requires_approval = true
 [prompts]
 planner = "prompts/planner.md"
 synthesis = "prompts/synthesis.md"
+tool_use = "prompts/tool_use.md"
 """.strip(),
                 encoding="utf-8",
             )
@@ -500,6 +956,10 @@ synthesis = "prompts/synthesis.md"
         self.assertEqual(
             settings.prompts.synthesis_path,
             Path(temp_dir) / "prompts" / "synthesis.md",
+        )
+        self.assertEqual(
+            settings.prompts.tool_use_path,
+            Path(temp_dir) / "prompts" / "tool_use.md",
         )
 
 
@@ -644,13 +1104,16 @@ class PromptTests(unittest.TestCase):
             root = Path(temp_dir)
             planner_path = root / "planner.md"
             synthesis_path = root / "synthesis.md"
+            tool_use_path = root / "tool_use.md"
             planner_path.write_text("custom planner prompt", encoding="utf-8")
             synthesis_path.write_text("custom synthesis prompt", encoding="utf-8")
+            tool_use_path.write_text("custom tool use prompt", encoding="utf-8")
 
-            prompts = PromptLibrary(planner_path, synthesis_path)
+            prompts = PromptLibrary(planner_path, synthesis_path, tool_use_path)
 
             self.assertEqual(prompts.planner_prompt(), "custom planner prompt")
             self.assertEqual(prompts.synthesis_prompt(), "custom synthesis prompt")
+            self.assertEqual(prompts.tool_use_prompt(), "custom tool use prompt")
 
 
 class TraceTests(unittest.TestCase):
@@ -659,7 +1122,9 @@ class TraceTests(unittest.TestCase):
     def test_save_list_and_show_run_trace(self) -> None:
         with TemporaryDirectory() as temp_dir:
             trace_store = TraceStore(Path(temp_dir) / "traces.sqlite3")
-            result = create_default_orchestrator().run(
+            config_path = Path(temp_dir) / "jarvis.toml"
+            config_path.write_text("", encoding="utf-8")
+            result = create_default_orchestrator(load_settings(config_path)).run(
                 "break this task into steps",
                 model_name="fake-local",
             )
@@ -679,6 +1144,44 @@ class TraceTests(unittest.TestCase):
 
 class PlannerTests(unittest.TestCase):
     """Tests for LLM-assisted planning validation."""
+
+    def test_planner_uses_role_model_route(self) -> None:
+        provider = StaticModelProvider(
+            """
+{
+  "steps": [
+    {
+      "tool_name": "memory.search",
+      "arguments": {"query": "Jordan"},
+      "description": "Search memory."
+    }
+  ]
+}
+""".strip()
+        )
+        with TemporaryDirectory() as temp_dir:
+            tools = default_tool_registry(
+                MemoryStore(Path(temp_dir) / "memory.sqlite3")
+            )
+            planner = Planner(
+                default_agent_registry(),
+                tools,
+                ModelRouter(
+                    {provider.name: provider, "fake-local": StaticModelProvider("")},
+                    default_provider_name="fake-local",
+                    role_routes={"planner": provider.name},
+                ),
+                PromptLibrary().planner_prompt(),
+            )
+
+            plan, source, _ = planner.create_plan(
+                "find memory about Jordan",
+                model_name=None,
+                model_mode="balanced",
+            )
+
+        self.assertEqual(source, "llm")
+        self.assertEqual(plan.steps[0].tool_call.tool_name, "memory.search")
 
     def test_llm_plan_uses_validated_tool_steps(self) -> None:
         provider = StaticModelProvider(
@@ -795,7 +1298,7 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(plan.steps[0].agent_name, "general")
         self.assertEqual(plan.steps[0].tool_call.tool_name, "general.generate_text")
 
-    def test_fallback_prefers_external_calendar_list_tool(self) -> None:
+    def test_fallback_does_not_provider_route_calendar_capability(self) -> None:
         with TemporaryDirectory() as temp_dir:
             tools = default_tool_registry(MemoryStore(Path(temp_dir) / "memory.sqlite3"))
             tools.register(
@@ -803,6 +1306,11 @@ class PlannerTests(unittest.TestCase):
                     name="external_calendar.list_calendars",
                     description="List external calendars.",
                     source="mcp:external_calendar",
+                    capability=ToolCapability(
+                        domain="calendar",
+                        operation="list_calendars",
+                        provider="external_calendar",
+                    ),
                 ),
                 lambda arguments: {"text": "external calendars"},
             )
@@ -816,8 +1324,226 @@ class PlannerTests(unittest.TestCase):
             plan = planner.create_fallback_plan("Use Calendar to list my calendars")
 
         tool_names = [step.tool_call.tool_name for step in plan.steps]
-        self.assertIn("external_calendar.list_calendars", tool_names)
+        self.assertIn("memory.search", tool_names)
+        self.assertIn("task.create_summary", tool_names)
+        self.assertNotIn("external_calendar.list_calendars", tool_names)
         self.assertNotIn("calendar.search_events", tool_names)
+
+    def test_llm_plan_selects_calendar_tool_from_catalog(self) -> None:
+        provider = StaticModelProvider(
+            """
+{
+  "steps": [
+    {
+      "tool_name": "external_calendar.list_events",
+      "arguments": {"calendar_id": "primary"},
+      "description": "List calendar events."
+    }
+  ]
+}
+""".strip()
+        )
+        with TemporaryDirectory() as temp_dir:
+            tools = default_tool_registry(MemoryStore(Path(temp_dir) / "memory.sqlite3"))
+            tools.register(
+                ToolSpec(
+                    name="external_calendar.list_events",
+                    description="List external calendar events.",
+                    source="mcp:external_calendar",
+                    input_schema={
+                        "type": "object",
+                        "properties": {
+                            "calendar_id": {"type": "string"},
+                            "start_time": {"type": "string"},
+                            "end_time": {"type": "string"},
+                            "max_results": {"type": "integer"},
+                        },
+                    },
+                    capability=ToolCapability(
+                        domain="calendar",
+                        operation="list_events",
+                        provider="external_calendar",
+                    ),
+                ),
+                lambda arguments: {"text": "external events"},
+            )
+            planner = Planner(
+                default_agent_registry(),
+                tools,
+                ModelRouter(
+                    {provider.name: provider},
+                    default_provider_name=provider.name,
+                ),
+                PromptLibrary().planner_prompt(),
+            )
+
+            plan, source, _ = planner.create_plan(
+                "Use Calendar to summarize my coming events in next 1 week",
+                model_name=provider.name,
+                model_mode="balanced",
+            )
+
+        calendar_step = next(
+            step
+            for step in plan.steps
+            if step.tool_call.tool_name == "external_calendar.list_events"
+        )
+        self.assertEqual(source, "llm")
+        self.assertEqual(calendar_step.agent_name, "calendar")
+        self.assertEqual(calendar_step.tool_call.arguments, {"calendar_id": "primary"})
+
+    def test_llm_plan_selects_email_tool_from_catalog(self) -> None:
+        provider = StaticModelProvider(
+            """
+{
+  "steps": [
+    {
+      "tool_name": "gmail.search_messages",
+      "arguments": {"query": "from:Jordan newer_than:30d"},
+      "description": "Search Gmail messages."
+    }
+  ]
+}
+""".strip()
+        )
+        with TemporaryDirectory() as temp_dir:
+            tools = default_tool_registry(MemoryStore(Path(temp_dir) / "memory.sqlite3"))
+            tools.register(
+                ToolSpec(
+                    name="gmail.search_messages",
+                    description="Search Gmail messages.",
+                    source="mcp:gmail",
+                    input_schema={
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                    },
+                    capability=ToolCapability(
+                        domain="email",
+                        operation="search_messages",
+                        provider="gmail",
+                    ),
+                ),
+                lambda arguments: {"text": "email results"},
+            )
+            planner = Planner(
+                default_agent_registry(),
+                tools,
+                ModelRouter(
+                    {provider.name: provider},
+                    default_provider_name=provider.name,
+                ),
+                PromptLibrary().planner_prompt(),
+            )
+
+            plan, source, _ = planner.create_plan(
+                "Find emails from Jordan",
+                model_name=provider.name,
+                model_mode="balanced",
+            )
+
+        email_step = next(
+            step
+            for step in plan.steps
+            if step.tool_call.tool_name == "gmail.search_messages"
+        )
+        self.assertEqual(source, "llm")
+        self.assertEqual(email_step.agent_name, "email")
+        self.assertEqual(
+            email_step.tool_call.arguments["query"],
+            "from:Jordan newer_than:30d",
+        )
+
+    def test_llm_plan_selects_music_tool_from_catalog(self) -> None:
+        provider = StaticModelProvider(
+            """
+{
+  "steps": [
+    {
+      "tool_name": "spotify.recently_played",
+      "arguments": {"limit": 10},
+      "description": "Read recently played tracks."
+    }
+  ]
+}
+""".strip()
+        )
+        with TemporaryDirectory() as temp_dir:
+            tools = default_tool_registry(MemoryStore(Path(temp_dir) / "memory.sqlite3"))
+            tools.register(
+                ToolSpec(
+                    name="spotify.recently_played",
+                    description="List recently played Spotify tracks.",
+                    source="mcp:spotify",
+                    input_schema={
+                        "type": "object",
+                        "properties": {"limit": {"type": "integer"}},
+                    },
+                    capability=ToolCapability(
+                        domain="music",
+                        operation="recently_played",
+                        provider="spotify",
+                    ),
+                ),
+                lambda arguments: {"text": "recent tracks"},
+            )
+            planner = Planner(
+                default_agent_registry(),
+                tools,
+                ModelRouter(
+                    {provider.name: provider},
+                    default_provider_name=provider.name,
+                ),
+                PromptLibrary().planner_prompt(),
+            )
+
+            plan, source, _ = planner.create_plan(
+                "Show me my recently played Spotify tracks",
+                model_name=provider.name,
+                model_mode="balanced",
+            )
+
+        music_step = next(
+            step
+            for step in plan.steps
+            if step.tool_call.tool_name == "spotify.recently_played"
+        )
+        self.assertEqual(source, "llm")
+        self.assertEqual(music_step.agent_name, "music")
+        self.assertEqual(music_step.tool_call.arguments, {"limit": 10})
+
+    def test_fallback_does_not_provider_route_music_capability(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            tools = default_tool_registry(MemoryStore(Path(temp_dir) / "memory.sqlite3"))
+            tools.register(
+                ToolSpec(
+                    name="spotify.list_playlists",
+                    description="List Spotify playlists.",
+                    source="mcp:spotify",
+                    input_schema={
+                        "type": "object",
+                        "properties": {"limit": {"type": "integer"}},
+                    },
+                    capability=ToolCapability(
+                        domain="music",
+                        operation="list_playlists",
+                        provider="spotify",
+                    ),
+                ),
+                lambda arguments: {"text": "playlists"},
+            )
+            planner = Planner(
+                default_agent_registry(),
+                tools,
+                ModelRouter({}),
+                PromptLibrary().planner_prompt(),
+            )
+
+            plan = planner.create_fallback_plan("List some of my Spotify playlists")
+
+        tool_names = [step.tool_call.tool_name for step in plan.steps]
+        self.assertIn("memory.search", tool_names)
+        self.assertNotIn("spotify.list_playlists", tool_names)
 
     def test_llm_plan_strips_unknown_mcp_arguments_from_schema(self) -> None:
         provider = StaticModelProvider(
@@ -869,9 +1595,10 @@ class PlannerTests(unittest.TestCase):
             {},
         )
 
-    def test_llm_plan_rejects_missing_required_schema_argument(self) -> None:
-        provider = StaticModelProvider(
-            """
+    def test_llm_plan_repairs_missing_required_schema_argument(self) -> None:
+        provider = SequencedModelProvider(
+            [
+                """
 {
   "steps": [
     {
@@ -881,7 +1608,19 @@ class PlannerTests(unittest.TestCase):
     }
   ]
 }
-""".strip()
+""".strip(),
+                """
+{
+  "steps": [
+    {
+      "tool_name": "external_calendar.get_event",
+      "arguments": {"eventId": "event-1"},
+      "description": "Get an event."
+    }
+  ]
+}
+""".strip(),
+            ]
         )
         with TemporaryDirectory() as temp_dir:
             tools = default_tool_registry(MemoryStore(Path(temp_dir) / "memory.sqlite3"))
@@ -914,18 +1653,569 @@ class PlannerTests(unittest.TestCase):
                 model_mode="balanced",
             )
 
-        self.assertEqual(source, "fallback")
-        self.assertNotEqual(
-            plan.steps[0].tool_call.tool_name,
-            "external_calendar.get_event",
+        self.assertEqual(source, "llm_repaired")
+        self.assertEqual(plan.steps[0].tool_call.tool_name, "external_calendar.get_event")
+        self.assertEqual(plan.steps[0].tool_call.arguments, {"eventId": "event-1"})
+
+    def test_llm_plan_repairs_unsupported_reference_syntax(self) -> None:
+        provider = SequencedModelProvider(
+            [
+                """
+{
+  "steps": [
+    {
+      "tool_name": "gmail.get_message",
+      "arguments": {"message_id": "$result.text"},
+      "description": "Get a message."
+    }
+  ]
+}
+""".strip(),
+                """
+{
+  "steps": [
+    {
+      "tool_name": "gmail.search_messages",
+      "arguments": {"query": "meeting newer_than:7d"},
+      "description": "Search messages."
+    }
+  ]
+}
+""".strip(),
+            ]
+        )
+        with TemporaryDirectory() as temp_dir:
+            tools = default_tool_registry(MemoryStore(Path(temp_dir) / "memory.sqlite3"))
+            tools.register(
+                ToolSpec(
+                    name="gmail.get_message",
+                    description="Get one Gmail message by API message id.",
+                    source="mcp:gmail",
+                    input_schema={
+                        "type": "object",
+                        "properties": {"message_id": {"type": "string"}},
+                        "required": ["message_id"],
+                    },
+                    capability=ToolCapability(
+                        domain="email",
+                        operation="get_message",
+                        provider="gmail",
+                    ),
+                ),
+                lambda arguments: {"text": "message"},
+            )
+            tools.register(
+                ToolSpec(
+                    name="gmail.search_messages",
+                    description="Search Gmail messages.",
+                    source="mcp:gmail",
+                    input_schema={
+                        "type": "object",
+                        "properties": {"query": {"type": "string"}},
+                        "required": ["query"],
+                    },
+                    capability=ToolCapability(
+                        domain="email",
+                        operation="search_messages",
+                        provider="gmail",
+                    ),
+                ),
+                lambda arguments: {"text": "matches"},
+            )
+            planner = Planner(
+                default_agent_registry(),
+                tools,
+                ModelRouter(
+                    {provider.name: provider},
+                    default_provider_name=provider.name,
+                ),
+                PromptLibrary().planner_prompt(),
+            )
+
+            plan, source, _ = planner.create_plan(
+                "Use Gmail to prep me for meetings this week",
+                model_name=provider.name,
+                model_mode="balanced",
+            )
+
+        self.assertEqual(source, "llm_repaired")
+        self.assertEqual(plan.steps[0].tool_call.tool_name, "gmail.search_messages")
+        self.assertEqual(
+            plan.steps[0].tool_call.arguments,
+            {"query": "meeting newer_than:7d"},
         )
 
-    def test_bundled_prompt_prefers_external_calendar_tools(self) -> None:
+    def test_llm_plan_falls_back_after_failed_repair(self) -> None:
+        provider = SequencedModelProvider(
+            [
+                """
+{
+  "steps": [
+    {
+      "tool_name": "external_calendar.get_event",
+      "arguments": {},
+      "description": "Get an event."
+    }
+  ]
+}
+""".strip(),
+                """
+{
+  "steps": [
+    {
+      "tool_name": "external_calendar.get_event",
+      "arguments": {},
+      "description": "Get an event."
+    }
+  ]
+}
+""".strip(),
+            ]
+        )
+        with TemporaryDirectory() as temp_dir:
+            tools = default_tool_registry(MemoryStore(Path(temp_dir) / "memory.sqlite3"))
+            tools.register(
+                ToolSpec(
+                    name="external_calendar.get_event",
+                    description="Get external calendar event.",
+                    source="mcp:external_calendar",
+                    input_schema={
+                        "type": "object",
+                        "properties": {"eventId": {"type": "string"}},
+                        "required": ["eventId"],
+                    },
+                ),
+                lambda arguments: {"text": "event"},
+            )
+            planner = Planner(
+                default_agent_registry(),
+                tools,
+                ModelRouter(
+                    {provider.name: provider},
+                    default_provider_name=provider.name,
+                ),
+                PromptLibrary().planner_prompt(),
+            )
+
+            plan, source, _ = planner.create_plan(
+                "Use Google Calendar to get an event",
+                model_name=provider.name,
+                model_mode="balanced",
+            )
+
+        tool_names = [step.tool_call.tool_name for step in plan.steps]
+        self.assertEqual(source, "fallback")
+        self.assertIn("memory.search", tool_names)
+        self.assertNotIn("external_calendar.get_event", tool_names)
+
+    def test_bundled_prompt_uses_generic_tool_selection_rules(self) -> None:
         prompt = PromptLibrary().planner_prompt()
 
-        self.assertIn("prefer external read-only calendar tools", prompt)
-        self.assertIn("calendar.search_events only when no external", prompt)
+        self.assertIn("Choose the tools that best satisfy the user goal", prompt)
+        self.assertIn("risk level", prompt)
         self.assertIn("Follow each tool's input_schema exactly", prompt)
+        self.assertNotIn("For calendar requests", prompt)
+        self.assertNotIn("For email or Gmail requests", prompt)
+        self.assertNotIn("For music or Spotify requests", prompt)
+
+
+class ArgumentResolverTests(unittest.TestCase):
+    """Tests for unified tool argument resolution."""
+
+    def test_tool_use_agent_uses_role_model_route(self) -> None:
+        tool = ToolSpec(
+            name="demo.lookup",
+            description="Look up demo data.",
+            input_schema={
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        )
+        provider = StaticModelProvider('{"query": "Jordan"}')
+        agent = ToolUseAgent(
+            ModelRouter(
+                {provider.name: provider, "fake-local": StaticModelProvider("")},
+                default_provider_name="fake-local",
+                role_routes={"tool_use": provider.name},
+            ),
+            system_prompt="tool use prompt",
+        )
+
+        resolution = agent.build(
+            "Look up Jordan.",
+            tool,
+            {},
+            model_name=None,
+            model_mode="balanced",
+        )
+
+        self.assertIsNone(resolution.error)
+        self.assertEqual(resolution.arguments["query"], "Jordan")
+
+    def test_resolver_does_not_hand_build_calendar_bounds(self) -> None:
+        tool = ToolSpec(
+            name="google_calendar.list_events",
+            description="List events.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "calendarId": {"type": "string"},
+                    "timeMin": {"type": "string"},
+                    "timeMax": {"type": "string"},
+                    "maxResults": {"type": "integer"},
+                },
+            },
+            capability=ToolCapability(
+                domain="calendar",
+                operation="list_events",
+                provider="google",
+            ),
+        )
+
+        resolution = resolve_tool_arguments(
+            "Use Calendar to summarize my coming events in next 1 week",
+            tool,
+            {"query": "ignore me"},
+        )
+
+        self.assertIsNone(resolution.error)
+        self.assertEqual(resolution.arguments, {})
+
+    def test_resolver_fills_builtin_defaults(self) -> None:
+        tool = ToolSpec(
+            name="general.generate_text",
+            description="Generate text.",
+        )
+
+        resolution = resolve_tool_arguments("draft a note", tool, {})
+
+        self.assertEqual(resolution.arguments["instruction"], "draft a note")
+        self.assertIsNone(resolution.error)
+
+    def test_resolver_resolves_last_text(self) -> None:
+        tool = ToolSpec(name="demo.echo", description="Echo.")
+        prior = (
+            ToolResult(
+                tool_name="general.generate_text",
+                output={"text": "Generated body."},
+            ),
+        )
+
+        resolution = resolve_tool_arguments(
+            "echo generated text",
+            tool,
+            {"text": "$last.text"},
+            prior_results=prior,
+        )
+
+        self.assertEqual(resolution.arguments["text"], "Generated body.")
+
+    def test_resolver_fails_cleanly_for_missing_last_text(self) -> None:
+        tool = ToolSpec(name="demo.echo", description="Echo.")
+
+        resolution = resolve_tool_arguments(
+            "echo generated text",
+            tool,
+            {"text": "$last.text"},
+        )
+
+        self.assertIn("no prior successful tool result", resolution.error or "")
+
+
+class ArgumentBuilderTests(unittest.TestCase):
+    """Tests for model-backed tool argument building and repair."""
+
+    def test_builder_uses_model_to_create_calendar_arguments(self) -> None:
+        provider = StaticModelProvider(
+            """
+{
+  "calendar_id": "primary",
+  "start_time": "2026-07-04T00:00:00-07:00",
+  "end_time": "2026-07-11T00:00:00-07:00",
+  "max_results": 10
+}
+""".strip()
+        )
+        tool = ToolSpec(
+            name="google_calendar.list_events",
+            description="List Google Calendar events.",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "calendar_id": {"type": "string"},
+                    "start_time": {"type": "string"},
+                    "end_time": {"type": "string"},
+                    "max_results": {"type": "integer"},
+                },
+            },
+            capability=ToolCapability(
+                domain="calendar",
+                operation="list_events",
+                provider="google",
+            ),
+        )
+        builder = ArgumentBuilder(
+            ModelRouter({provider.name: provider}, provider.name),
+        )
+
+        resolution = builder.build(
+            "Use Google Calendar to summarize my coming events in next 1 week",
+            tool,
+            {},
+            model_name=provider.name,
+            model_mode="balanced",
+        )
+
+        self.assertIsNone(resolution.error)
+        self.assertEqual(resolution.arguments["calendar_id"], "primary")
+        self.assertEqual(
+            resolution.arguments["start_time"],
+            "2026-07-04T00:00:00-07:00",
+        )
+
+    def test_builder_retries_after_validation_error(self) -> None:
+        provider = SequencedModelProvider(
+            [
+                '{"wrong": "shape"}',
+                '{"eventId": "evt-1"}',
+            ]
+        )
+        tool = ToolSpec(
+            name="google_calendar.get_event",
+            description="Get a Google Calendar event.",
+            input_schema={
+                "type": "object",
+                "properties": {"eventId": {"type": "string"}},
+                "required": ["eventId"],
+            },
+            capability=ToolCapability(
+                domain="calendar",
+                operation="get_event",
+                provider="google",
+            ),
+        )
+        builder = ArgumentBuilder(
+            ModelRouter({provider.name: provider}, provider.name),
+        )
+
+        resolution = builder.build(
+            "Get event evt-1 from Google Calendar",
+            tool,
+            {},
+            model_name=provider.name,
+            model_mode="balanced",
+        )
+
+        self.assertIsNone(resolution.error)
+        self.assertEqual(resolution.arguments, {"eventId": "evt-1"})
+
+    def test_builder_repairs_bad_last_reference_for_model_backed_tool(self) -> None:
+        provider = StaticModelProvider('{"calendar_id": "primary"}')
+        tool = ToolSpec(
+            name="google_calendar.list_events",
+            description="List Google Calendar events.",
+            input_schema={
+                "type": "object",
+                "properties": {"calendar_id": {"type": "string"}},
+            },
+            capability=ToolCapability(
+                domain="calendar",
+                operation="list_events",
+                provider="google",
+            ),
+        )
+        builder = ArgumentBuilder(
+            ModelRouter({provider.name: provider}, provider.name),
+        )
+
+        resolution = builder.build(
+            "List my Google Calendar events",
+            tool,
+            {"calendar_id": "$last.text"},
+            model_name=provider.name,
+            model_mode="balanced",
+        )
+
+        self.assertIsNone(resolution.error)
+        self.assertEqual(resolution.arguments, {"calendar_id": "primary"})
+
+    def test_builder_fails_cleanly_after_invalid_attempts(self) -> None:
+        provider = StaticModelProvider('{"wrong": "shape"}')
+        tool = ToolSpec(
+            name="google_calendar.get_event",
+            description="Get a Google Calendar event.",
+            input_schema={
+                "type": "object",
+                "properties": {"eventId": {"type": "string"}},
+                "required": ["eventId"],
+            },
+            capability=ToolCapability(
+                domain="calendar",
+                operation="get_event",
+                provider="google",
+            ),
+        )
+        builder = ArgumentBuilder(
+            ModelRouter({provider.name: provider}, provider.name),
+        )
+
+        resolution = builder.build(
+            "Get an event from Google Calendar",
+            tool,
+            {},
+            model_name=provider.name,
+            model_mode="balanced",
+        )
+
+        self.assertIn("Missing required argument", resolution.error or "")
+
+    def test_argument_builder_remains_compatible_alias(self) -> None:
+        provider = StaticModelProvider('{"query": "Jordan"}')
+        tool = ToolSpec(
+            name="memory.search",
+            description="Search memory.",
+            input_schema={
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+        )
+        builder = ArgumentBuilder(
+            ModelRouter({provider.name: provider}, provider.name),
+        )
+
+        resolution = builder.build(
+            "search for Jordan",
+            tool,
+            {},
+            model_name=provider.name,
+            model_mode="balanced",
+        )
+
+        self.assertIsNone(resolution.error)
+        self.assertEqual(resolution.arguments, {"query": "Jordan"})
+
+    def test_tool_use_agent_includes_execution_feedback(self) -> None:
+        provider = CapturingModelProvider('{"calendar_id": "primary"}')
+        tool = ToolSpec(
+            name="google_calendar.list_events",
+            description="List Google Calendar events.",
+            input_schema={
+                "type": "object",
+                "properties": {"calendar_id": {"type": "string"}},
+            },
+            capability=ToolCapability(
+                domain="calendar",
+                operation="list_events",
+                provider="google",
+            ),
+        )
+        agent = ToolUseAgent(
+            ModelRouter({provider.name: provider}, provider.name),
+            system_prompt="tool use prompt",
+        )
+
+        resolution = agent.build(
+            "List calendar events",
+            tool,
+            {"calendar_id": "bad"},
+            model_name=provider.name,
+            model_mode="balanced",
+            feedback=ToolUseFeedback(
+                stage="execution",
+                attempted_arguments={"calendar_id": "bad"},
+                error="Invalid calendar id.",
+                output={"status": 400},
+            ),
+        )
+
+        self.assertIsNone(resolution.error)
+        self.assertEqual(resolution.arguments, {"calendar_id": "primary"})
+        self.assertIn("Invalid calendar id.", provider.last_request.messages[0])
+        self.assertIn('"stage": "execution"', provider.last_request.messages[0])
+
+    def test_tool_use_agent_includes_selected_tool_argument_hints(self) -> None:
+        provider = CapturingModelProvider('{"query": "from:Jordan newer_than:30d"}')
+        tool = ToolSpec(
+            name="gmail.search_messages",
+            description="Search Gmail messages.",
+            argument_hints=(
+                "Use Gmail search syntax in query. For recent mail, prefer "
+                "newer_than:30d."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"],
+            },
+            capability=ToolCapability(
+                domain="email",
+                operation="search_messages",
+                provider="google",
+            ),
+        )
+        agent = ToolUseAgent(
+            ModelRouter({provider.name: provider}, provider.name),
+            system_prompt="tool use prompt",
+        )
+
+        resolution = agent.build(
+            "Find recent emails from Jordan",
+            tool,
+            {},
+            model_name=provider.name,
+            model_mode="balanced",
+        )
+
+        self.assertIsNone(resolution.error)
+        self.assertEqual(
+            resolution.arguments,
+            {"query": "from:Jordan newer_than:30d"},
+        )
+        self.assertIsNotNone(provider.last_request)
+        assert provider.last_request is not None
+        self.assertIn("argument_hints", provider.last_request.messages[0])
+        self.assertIn("newer_than:30d", provider.last_request.messages[0])
+
+    def test_tool_use_agent_records_attempt_metadata(self) -> None:
+        provider = SequencedModelProvider(
+            [
+                '{"wrong": "shape"}',
+                '{"eventId": "evt-1"}',
+            ]
+        )
+        tool = ToolSpec(
+            name="google_calendar.get_event",
+            description="Get a Google Calendar event.",
+            input_schema={
+                "type": "object",
+                "properties": {"eventId": {"type": "string"}},
+                "required": ["eventId"],
+            },
+            capability=ToolCapability(
+                domain="calendar",
+                operation="get_event",
+                provider="google",
+            ),
+        )
+        agent = ToolUseAgent(
+            ModelRouter({provider.name: provider}, provider.name),
+            system_prompt="tool use prompt",
+        )
+
+        resolution = agent.build(
+            "Get event evt-1",
+            tool,
+            {},
+            model_name=provider.name,
+            model_mode="balanced",
+        )
+
+        self.assertIsNone(resolution.error)
+        self.assertEqual(len(resolution.attempts), 2)
+        self.assertIsNotNone(resolution.attempts[0].error)
+        self.assertIsNone(resolution.attempts[1].error)
 
 
 class GeneralToolTests(unittest.TestCase):
@@ -1028,8 +2318,9 @@ class SynthesisTests(unittest.TestCase):
 
             result = orchestrator.run("prepare Jordan context", provider.name)
 
-        self.assertIn("Goal: prepare Jordan context", result.final_response)
         self.assertIn("Jordan owns the API migration.", result.final_response)
+        self.assertNotIn("Completed tool calls", result.final_response)
+        self.assertNotIn("Grounded results", result.final_response)
         synthesis_event = next(
             event for event in result.trace if event.event_type == "synthesis.completed"
         )
@@ -1063,11 +2354,658 @@ class SynthesisTests(unittest.TestCase):
 
             result = orchestrator.run("prepare Jordan context", provider.name)
 
-        self.assertIn("Goal: prepare Jordan context", result.final_response)
+        self.assertIn("Jordan owns the API migration.", result.final_response)
+        self.assertNotIn("Goal: prepare Jordan context", result.final_response)
         synthesis_event = next(
             event for event in result.trace if event.event_type == "synthesis.completed"
         )
         self.assertEqual(synthesis_event.data["source"], "failed_then_fallback")
+
+    def test_orchestrator_rejects_runtime_shaped_synthesis(self) -> None:
+        provider = SequencedModelProvider(
+            [
+                """
+{
+  "steps": [
+    {
+      "tool_name": "memory.search",
+      "arguments": {"query": "Jordan"},
+      "description": "Search memory."
+    }
+  ]
+}
+""".strip(),
+                "Completed tool calls:\n- OK memory.search\n\nGrounded results:",
+            ]
+        )
+        with TemporaryDirectory() as temp_dir:
+            memory_store = MemoryStore(Path(temp_dir) / "memory.sqlite3")
+            memory_store.add("Jordan owns the API migration.", memory_type="fact")
+            orchestrator = _orchestrator_with_provider(provider, memory_store)
+
+            result = orchestrator.run("prepare Jordan context", provider.name)
+
+        self.assertIn("Jordan owns the API migration.", result.final_response)
+        self.assertNotIn("Completed tool calls", result.final_response)
+        synthesis_event = next(
+            event for event in result.trace if event.event_type == "synthesis.completed"
+        )
+        self.assertEqual(synthesis_event.data["source"], "failed_then_fallback")
+
+    def test_synthesis_rejects_unexecuted_tool_family_claim(self) -> None:
+        available_tools = (
+            AvailableTool(
+                name="google_calendar.list_events",
+                description="List calendar events.",
+                argument_hints=None,
+                risk_level="low",
+                requires_approval=False,
+                source="test",
+                capability=ToolCapability(
+                    domain="calendar",
+                    operation="list_events",
+                ),
+            ),
+            AvailableTool(
+                name="gmail.list_recent",
+                description="List recent Gmail messages.",
+                argument_hints=None,
+                risk_level="low",
+                requires_approval=False,
+                source="test",
+                capability=ToolCapability(
+                    domain="email",
+                    operation="list_recent",
+                ),
+            ),
+        )
+        results = (
+            ToolResult(
+                tool_name="google_calendar.list_events",
+                output={},
+                success=False,
+                error="The caller does not have permission.",
+            ),
+        )
+        plan = ExecutionPlan(goal="Review my week", steps=())
+
+        self.assertFalse(
+            _is_supported_synthesis(
+                "A related recent Gmail message is available.",
+                plan,
+                results,
+                available_tools,
+            )
+        )
+        self.assertFalse(
+            _is_supported_synthesis(
+                "Your calendar shows a one-on-one meeting.",
+                plan,
+                results,
+                available_tools,
+            )
+        )
+        self.assertFalse(
+            _is_supported_synthesis(
+                "This is likely a one-on-one meeting.",
+                plan,
+                results,
+                available_tools,
+            )
+        )
+        self.assertTrue(
+            _is_supported_synthesis(
+                "Calendar data is unavailable because the caller lacks permission.",
+                plan,
+                results,
+                available_tools,
+            )
+        )
+
+
+class ToolUseOrchestratorTests(unittest.TestCase):
+    """Tests for ToolUseAgent integration in orchestration."""
+
+    def test_read_only_tool_execution_error_can_be_repaired(self) -> None:
+        provider = SequencedModelProvider(
+            [
+                """
+{
+  "steps": [
+    {
+      "tool_name": "google_calendar.list_events",
+      "arguments": {"calendar_id": "bad"},
+      "description": "List calendar events."
+    }
+  ]
+}
+""".strip(),
+                '{"calendar_id": "bad"}',
+                '{"calendar_id": "primary"}',
+                "Calendar events were summarized.",
+            ]
+        )
+        calls: list[dict[str, object]] = []
+
+        def flaky_calendar(arguments: dict[str, object]) -> dict[str, object]:
+            calls.append(dict(arguments))
+            if arguments.get("calendar_id") != "primary":
+                raise ValueError("Invalid JSON payload: bad calendar id.")
+            return {"text": "Events for primary: standup"}
+
+        tools = ToolRegistry()
+        tools.register(
+            ToolSpec(
+                name="google_calendar.list_events",
+                description="List Google Calendar events.",
+                source="mcp:google_calendar",
+                input_schema={
+                    "type": "object",
+                    "properties": {"calendar_id": {"type": "string"}},
+                },
+                capability=ToolCapability(
+                    domain="calendar",
+                    operation="list_events",
+                    provider="google",
+                    read_only=True,
+                ),
+            ),
+            flaky_calendar,
+        )
+        orchestrator = Orchestrator(
+            agents=default_agent_registry(),
+            tools=tools,
+            models=ModelRouter({provider.name: provider}, provider.name),
+            policies=PolicyEngine(),
+            planner_prompt=PromptLibrary().planner_prompt(),
+            synthesis_prompt=PromptLibrary().synthesis_prompt(),
+            tool_use_prompt=PromptLibrary().tool_use_prompt(),
+        )
+
+        result = orchestrator.run("Use Google Calendar for events", provider.name)
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(len(result.step_results), 1)
+        self.assertEqual(calls, [{"calendar_id": "bad"}, {"calendar_id": "primary"}])
+        self.assertEqual(
+            result.plan.steps[0].tool_call.arguments,
+            {"calendar_id": "primary"},
+        )
+        trace_types = [event.event_type for event in result.trace]
+        self.assertIn("tool_use.execution_retry.started", trace_types)
+        self.assertIn("tool_use.execution_retry.completed", trace_types)
+
+    def test_execution_error_repair_does_not_retry_medium_risk_tool(self) -> None:
+        provider = SequencedModelProvider(
+            [
+                """
+{
+  "steps": [
+    {
+      "tool_name": "google_calendar.list_events",
+      "arguments": {"calendar_id": "bad"},
+      "description": "List calendar events."
+    }
+  ]
+}
+""".strip(),
+                '{"calendar_id": "bad"}',
+                "Tool failed.",
+            ]
+        )
+        calls: list[dict[str, object]] = []
+
+        def failing_calendar(arguments: dict[str, object]) -> dict[str, object]:
+            calls.append(dict(arguments))
+            raise ValueError("Invalid JSON payload: bad calendar id.")
+
+        tools = ToolRegistry()
+        tools.register(
+            ToolSpec(
+                name="google_calendar.list_events",
+                description="List Google Calendar events.",
+                risk_level="medium",
+                source="mcp:google_calendar",
+                input_schema={
+                    "type": "object",
+                    "properties": {"calendar_id": {"type": "string"}},
+                },
+                capability=ToolCapability(
+                    domain="calendar",
+                    operation="list_events",
+                    provider="google",
+                    read_only=True,
+                ),
+            ),
+            failing_calendar,
+        )
+        orchestrator = Orchestrator(
+            agents=default_agent_registry(),
+            tools=tools,
+            models=ModelRouter({provider.name: provider}, provider.name),
+            policies=PolicyEngine(),
+            planner_prompt=PromptLibrary().planner_prompt(),
+            synthesis_prompt=PromptLibrary().synthesis_prompt(),
+            tool_use_prompt=PromptLibrary().tool_use_prompt(),
+        )
+
+        result = orchestrator.run("Use Google Calendar for events", provider.name)
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(len(calls), 1)
+        trace_types = [event.event_type for event in result.trace]
+        self.assertNotIn("tool_use.execution_retry.started", trace_types)
+
+    def test_execution_error_repair_does_not_retry_auth_error(self) -> None:
+        provider = SequencedModelProvider(
+            [
+                """
+{
+  "steps": [
+    {
+      "tool_name": "google_calendar.list_events",
+      "arguments": {"calendar_id": "primary"},
+      "description": "List calendar events."
+    }
+  ]
+}
+""".strip(),
+                '{"calendar_id": "primary"}',
+                "Tool failed.",
+            ]
+        )
+        calls: list[dict[str, object]] = []
+
+        def auth_failing_calendar(arguments: dict[str, object]) -> dict[str, object]:
+            calls.append(dict(arguments))
+            raise ValueError("OAuth token request failed: client_secret is missing.")
+
+        tools = ToolRegistry()
+        tools.register(
+            ToolSpec(
+                name="google_calendar.list_events",
+                description="List Google Calendar events.",
+                source="mcp:google_calendar",
+                input_schema={
+                    "type": "object",
+                    "properties": {"calendar_id": {"type": "string"}},
+                },
+                capability=ToolCapability(
+                    domain="calendar",
+                    operation="list_events",
+                    provider="google",
+                    read_only=True,
+                ),
+            ),
+            auth_failing_calendar,
+        )
+        orchestrator = Orchestrator(
+            agents=default_agent_registry(),
+            tools=tools,
+            models=ModelRouter({provider.name: provider}, provider.name),
+            policies=PolicyEngine(),
+            planner_prompt=PromptLibrary().planner_prompt(),
+            synthesis_prompt=PromptLibrary().synthesis_prompt(),
+            tool_use_prompt=PromptLibrary().tool_use_prompt(),
+        )
+
+        result = orchestrator.run("Use Google Calendar for events", provider.name)
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(len(calls), 1)
+        trace_types = [event.event_type for event in result.trace]
+        self.assertNotIn("tool_use.execution_retry.started", trace_types)
+
+    def test_execution_error_repair_failure_keeps_step_failed(self) -> None:
+        provider = SequencedModelProvider(
+            [
+                """
+{
+  "steps": [
+    {
+      "tool_name": "google_calendar.list_events",
+      "arguments": {"calendar_id": "bad"},
+      "description": "List calendar events."
+    }
+  ]
+}
+""".strip(),
+                '{"calendar_id": "bad"}',
+                '{"calendar_id": "still-bad"}',
+                "Tool failed.",
+            ]
+        )
+        calls: list[dict[str, object]] = []
+
+        def failing_calendar(arguments: dict[str, object]) -> dict[str, object]:
+            calls.append(dict(arguments))
+            raise ValueError("Invalid JSON payload: bad calendar id.")
+
+        tools = ToolRegistry()
+        tools.register(
+            ToolSpec(
+                name="google_calendar.list_events",
+                description="List Google Calendar events.",
+                source="mcp:google_calendar",
+                input_schema={
+                    "type": "object",
+                    "properties": {"calendar_id": {"type": "string"}},
+                },
+                capability=ToolCapability(
+                    domain="calendar",
+                    operation="list_events",
+                    provider="google",
+                    read_only=True,
+                ),
+            ),
+            failing_calendar,
+        )
+        orchestrator = Orchestrator(
+            agents=default_agent_registry(),
+            tools=tools,
+            models=ModelRouter({provider.name: provider}, provider.name),
+            policies=PolicyEngine(),
+            planner_prompt=PromptLibrary().planner_prompt(),
+            synthesis_prompt=PromptLibrary().synthesis_prompt(),
+            tool_use_prompt=PromptLibrary().tool_use_prompt(),
+        )
+
+        result = orchestrator.run("Use Google Calendar for events", provider.name)
+
+        self.assertEqual(result.status, "failed")
+        self.assertEqual(len(result.step_results), 1)
+        self.assertEqual(calls, [{"calendar_id": "bad"}, {"calendar_id": "still-bad"}])
+        self.assertEqual(
+            result.step_results[0].error,
+            "Invalid JSON payload: bad calendar id.",
+        )
+        failed_event = next(
+            event for event in result.trace if event.event_type == "step.failed"
+        )
+        self.assertEqual(
+            failed_event.data["error"],
+            "Invalid JSON payload: bad calendar id.",
+        )
+        with TemporaryDirectory() as temp_dir:
+            trace_store = TraceStore(Path(temp_dir) / "traces.sqlite3")
+            trace_store.save_run(result)
+            stored_trace = trace_store.get_run(result.run_id)
+
+        self.assertIsNotNone(stored_trace)
+        assert stored_trace is not None
+        stored_failure = next(
+            event for event in stored_trace.events if event.event_type == "step.failed"
+        )
+        self.assertEqual(
+            stored_failure.data["error"],
+            "Invalid JSON payload: bad calendar id.",
+        )
+        trace_types = [event.event_type for event in result.trace]
+        self.assertIn("tool_use.execution_retry.completed", trace_types)
+
+
+class EvalHarnessTests(unittest.TestCase):
+    """Tests for isolated planner and ToolUseAgent evals."""
+
+    def test_load_eval_suite_from_json(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            suite_path = Path(temp_dir) / "suite.json"
+            suite_path.write_text(
+                json.dumps(
+                    {
+                        "name": "demo suite",
+                        "description": "Small planner suite.",
+                        "cases": [
+                            {
+                                "id": "calendar-list",
+                                "kind": "planner",
+                                "goal": "List my calendars.",
+                                "expected_tools": ["google_calendar.list_calendars"],
+                                "expected_tool_groups": [
+                                    ["google_calendar.list_calendars", "demo.list"]
+                                ],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            suite = load_eval_suite(suite_path)
+
+        self.assertEqual(suite.name, "demo suite")
+        self.assertEqual(suite.cases[0].expected_tools, ("google_calendar.list_calendars",))
+        self.assertEqual(
+            suite.cases[0].expected_tool_groups,
+            (("google_calendar.list_calendars", "demo.list"),),
+        )
+
+    def test_planner_eval_scores_expected_tool_choice(self) -> None:
+        tools = ToolRegistry()
+        tools.register(
+            ToolSpec(
+                name="demo.search",
+                description="Search demo records.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                },
+            ),
+            lambda arguments: {"text": "unused"},
+        )
+        provider = StaticModelProvider(
+            """
+{
+  "steps": [
+    {
+      "tool_name": "demo.search",
+      "arguments": {"query": "Jordan"},
+      "description": "Search demo records."
+    }
+  ]
+}
+""".strip()
+        )
+        suite = EvalSuite(
+            name="planner demo",
+            description=None,
+            cases=(
+                EvalCase(
+                    id="demo-search",
+                    kind="planner",
+                    goal="Find demo records about Jordan.",
+                    expected_tools=("demo.search",),
+                    expected_tool_groups=(("demo.search", "demo.lookup"),),
+                    forbidden_tools=("task.breakdown",),
+                    max_steps=1,
+                ),
+            ),
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "jarvis.toml"
+            config_path.write_text("", encoding="utf-8")
+            settings = load_settings(config_path)
+            report = run_eval_suite(
+                suite=suite,
+                settings=settings,
+                model_name=provider.name,
+                model_mode="balanced",
+                agents=default_agent_registry(),
+                tools=tools,
+                models=ModelRouter({provider.name: provider}, provider.name),
+            )
+
+        self.assertEqual(report.passed, 1)
+        self.assertEqual(report.failed, 0)
+        self.assertEqual(report.results[0].actual_tools, ("demo.search",))
+
+    def test_planner_eval_flags_fallback_by_default(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "jarvis.toml"
+            config_path.write_text("", encoding="utf-8")
+            tools = default_tool_registry(
+                MemoryStore(Path(temp_dir) / "memory.sqlite3")
+            )
+            suite = EvalSuite(
+                name="fallback demo",
+                description=None,
+                cases=(
+                    EvalCase(
+                        id="no-fallback",
+                        kind="planner",
+                        goal="Find something.",
+                        expected_tools=("demo.search",),
+                    ),
+                ),
+            )
+            settings = load_settings(config_path)
+            report = run_eval_suite(
+                suite=suite,
+                settings=settings,
+                model_name="fake-local",
+                model_mode="balanced",
+                tools=tools,
+                models=ModelRouter({}, "fake-local"),
+            )
+
+        self.assertEqual(report.failed, 1)
+        self.assertIn("Planner used fallback.", report.results[0].errors)
+
+    def test_tool_use_eval_scores_arguments(self) -> None:
+        tools = ToolRegistry()
+        tools.register(
+            ToolSpec(
+                name="demo.lookup",
+                description="Look up one demo record.",
+                input_schema={
+                    "type": "object",
+                    "properties": {
+                        "query": {"type": "string"},
+                        "limit": {"type": "integer"},
+                    },
+                    "required": ["query"],
+                },
+                argument_hints="Use a concise query and a small limit.",
+            ),
+            lambda arguments: {"text": "unused"},
+        )
+        provider = StaticModelProvider('{"query": "Jordan", "limit": 5}')
+        suite = EvalSuite(
+            name="tool use demo",
+            description=None,
+            cases=(
+                EvalCase(
+                    id="lookup-args",
+                    kind="tool_use",
+                    goal="Look up demo records about Jordan.",
+                    tool_name="demo.lookup",
+                    rough_arguments={},
+                    expected_arguments={"query": "Jordan", "limit": 5},
+                    required_argument_keys=("query",),
+                    forbidden_argument_keys=("unused",),
+                ),
+            ),
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "jarvis.toml"
+            config_path.write_text("", encoding="utf-8")
+            settings = load_settings(config_path)
+            report = run_eval_suite(
+                suite=suite,
+                settings=settings,
+                model_name=provider.name,
+                model_mode="balanced",
+                tools=tools,
+                models=ModelRouter({provider.name: provider}, provider.name),
+            )
+
+        self.assertEqual(report.passed, 1)
+        self.assertEqual(report.results[0].actual_arguments["query"], "Jordan")
+
+    def test_tool_use_eval_reports_missing_tool(self) -> None:
+        suite = EvalSuite(
+            name="missing tool demo",
+            description=None,
+            cases=(
+                EvalCase(
+                    id="missing-tool",
+                    kind="tool_use",
+                    goal="Use a missing tool.",
+                    tool_name="missing.tool",
+                    rough_arguments={},
+                ),
+            ),
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "jarvis.toml"
+            config_path.write_text("", encoding="utf-8")
+            settings = load_settings(config_path)
+            report = run_eval_suite(
+                suite=suite,
+                settings=settings,
+                model_name="fake-local",
+                model_mode="balanced",
+                tools=ToolRegistry(),
+                models=ModelRouter({}, "fake-local"),
+            )
+
+        self.assertEqual(report.failed, 1)
+        self.assertIn("Unknown tool: missing.tool", report.results[0].errors[0])
+
+    def test_tool_use_eval_accepts_prior_results(self) -> None:
+        tools = ToolRegistry()
+        tools.register(
+            ToolSpec(
+                name="demo.echo",
+                description="Echo demo text.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"text": {"type": "string"}},
+                    "required": ["text"],
+                },
+            ),
+            lambda arguments: {"text": "unused"},
+        )
+        suite = EvalSuite(
+            name="prior result demo",
+            description=None,
+            cases=(
+                EvalCase(
+                    id="prior-text",
+                    kind="tool_use",
+                    goal="Echo the previous text.",
+                    tool_name="demo.echo",
+                    rough_arguments={"text": "$last.text"},
+                    prior_results=(
+                        ToolResult(
+                            tool_name="general.generate_text",
+                            output={"text": "hello from prior"},
+                        ),
+                    ),
+                    expected_arguments={"text": "hello from prior"},
+                ),
+            ),
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "jarvis.toml"
+            config_path.write_text("", encoding="utf-8")
+            settings = load_settings(config_path)
+            report = run_eval_suite(
+                suite=suite,
+                settings=settings,
+                model_name="fake-local",
+                model_mode="balanced",
+                tools=tools,
+                models=ModelRouter({}, "fake-local"),
+            )
+
+        self.assertEqual(report.passed, 1)
+        self.assertEqual(report.results[0].actual_arguments["text"], "hello from prior")
 
 
 class PluginTests(unittest.TestCase):
@@ -1118,6 +3056,8 @@ class AuthStoreTests(unittest.TestCase):
         self.assertTrue(cleared)
 
     def test_auth_debug_reports_scope_diff_without_token_value(self) -> None:
+        secret_env = "JARVIS_TEST_CLIENT_SECRET"
+        previous_secret = os.environ.pop(secret_env, None)
         with _tokeninfo_server() as tokeninfo_url:
             with TemporaryDirectory() as temp_dir:
                 root = Path(temp_dir)
@@ -1130,6 +3070,7 @@ database_path = "auth.sqlite3"
 [[auth.oauth_providers]]
 name = "demo_oauth"
 client_id = "client-id"
+client_secret_env = "{secret_env}"
 tokeninfo_url = "{tokeninfo_url}"
 scopes = ["calendar.read", "calendar.write"]
 """.strip(),
@@ -1145,13 +3086,25 @@ scopes = ["calendar.read", "calendar.write"]
 
                 debug = _auth_debug(settings, auth_store, "demo_oauth")
 
+        if previous_secret is not None:
+            os.environ[secret_env] = previous_secret
         encoded = json.dumps(debug, default=str)
         self.assertNotIn(_TokenInfoHandler.expected_token, encoded)
         self.assertTrue(debug["token_stored"])
         self.assertTrue(debug["refresh_token_stored"])
+        self.assertEqual(debug["client_secret_env"], secret_env)
+        self.assertFalse(debug["client_secret_present"])
         self.assertEqual(debug["granted_scopes"], ["calendar.read"])
         self.assertEqual(debug["missing_configured_scopes"], ["calendar.write"])
         self.assertTrue(debug["client_id_matches_audience"])
+
+    def test_oauth_post_form_reports_provider_error(self) -> None:
+        with _oauth_error_server() as token_url:
+            with self.assertRaises(RuntimeError) as context:
+                _post_form(token_url, {"grant_type": "refresh_token"})
+
+        self.assertIn("invalid_request", str(context.exception))
+        self.assertIn("client_secret is missing", str(context.exception))
 
     def test_auth_debug_handles_missing_provider(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1164,6 +3117,50 @@ scopes = ["calendar.read", "calendar.write"]
 
         self.assertFalse(debug["provider_configured"])
         self.assertFalse(debug["token_stored"])
+
+
+class CliToolCallTests(unittest.TestCase):
+    """Tests for direct tool-call debugging helpers."""
+
+    def test_parse_args_json_requires_object(self) -> None:
+        self.assertEqual(_parse_args_json('{"goal": "demo"}'), {"goal": "demo"})
+        with self.assertRaises(ValueError):
+            _parse_args_json("[]")
+
+    def test_print_tool_result_prefers_text(self) -> None:
+        stdout = StringIO()
+        with redirect_stdout(stdout):
+            _print_tool_result({"text": "hello"})
+
+        self.assertEqual(stdout.getvalue().strip(), "hello")
+
+    def test_tool_call_cli_executes_registered_tool(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "jarvis.toml"
+            config_path.write_text("", encoding="utf-8")
+            previous_argv = sys.argv
+            sys.argv = [
+                "jarvis",
+                "tool",
+                "call",
+                "task.breakdown",
+                "--args-json",
+                '{"goal": "demo"}',
+                "--config",
+                str(config_path),
+                "--json",
+            ]
+            stdout = StringIO()
+            try:
+                with redirect_stdout(stdout):
+                    cli_main()
+            finally:
+                sys.argv = previous_argv
+
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(payload["success"])
+        self.assertEqual(payload["tool_name"], "task.breakdown")
+        self.assertEqual(payload["output"]["goal"], "demo")
 
 
 class GoogleCalendarFastMcpWrapperTests(unittest.TestCase):
@@ -1225,6 +3222,203 @@ class GoogleCalendarFastMcpWrapperTests(unittest.TestCase):
         )
 
 
+class GoogleGmailFastMcpWrapperTests(unittest.TestCase):
+    """Tests for the local FastMCP Gmail REST wrapper."""
+
+    def test_search_messages_fetches_metadata_and_formats_results(self) -> None:
+        module = _google_gmail_fastmcp_module()
+        with _gmail_api_server() as api_base_url:
+            with TemporaryDirectory() as temp_dir:
+                auth_db = Path(temp_dir) / "auth.sqlite3"
+                AuthStore(auth_db).set_token(
+                    "google",
+                    _GmailApiHandler.expected_token,
+                )
+
+                text = module.search_messages_text(
+                    auth_db=auth_db,
+                    config_path=None,
+                    provider="google",
+                    api_base_url=api_base_url,
+                    query="from:jordan",
+                    max_results=5,
+                )
+
+        self.assertEqual(_GmailApiHandler.last_authorization, "Bearer test-token")
+        self.assertEqual(_GmailApiHandler.last_list_query.get("q"), ["from:jordan"])
+        self.assertIn('Gmail search results for "from:jordan":', text)
+        self.assertIn("Project update", text)
+        self.assertIn("id=msg-1", text)
+        self.assertIn("thread=thread-1", text)
+
+    def test_list_recent_uses_label_filter(self) -> None:
+        module = _google_gmail_fastmcp_module()
+        with _gmail_api_server() as api_base_url:
+            with TemporaryDirectory() as temp_dir:
+                auth_db = Path(temp_dir) / "auth.sqlite3"
+                AuthStore(auth_db).set_token(
+                    "google",
+                    _GmailApiHandler.expected_token,
+                )
+
+                text = module.list_recent_text(
+                    auth_db=auth_db,
+                    config_path=None,
+                    provider="google",
+                    api_base_url=api_base_url,
+                    max_results=2,
+                    label_ids="INBOX,IMPORTANT",
+                )
+
+        self.assertEqual(
+            _GmailApiHandler.last_list_query.get("labelIds"),
+            ["INBOX", "IMPORTANT"],
+        )
+        self.assertIn("Recent Gmail messages:", text)
+        self.assertIn("Project update", text)
+
+    def test_get_message_formats_one_message(self) -> None:
+        module = _google_gmail_fastmcp_module()
+        with _gmail_api_server() as api_base_url:
+            with TemporaryDirectory() as temp_dir:
+                auth_db = Path(temp_dir) / "auth.sqlite3"
+                AuthStore(auth_db).set_token(
+                    "google",
+                    _GmailApiHandler.expected_token,
+                )
+
+                text = module.get_message_text(
+                    auth_db=auth_db,
+                    config_path=None,
+                    provider="google",
+                    api_base_url=api_base_url,
+                    message_id="msg-1",
+                )
+
+        self.assertIn("Message:", text)
+        self.assertIn("Project update", text)
+        self.assertIn("from Jordan", text)
+
+    def test_get_thread_formats_thread_messages(self) -> None:
+        module = _google_gmail_fastmcp_module()
+        with _gmail_api_server() as api_base_url:
+            with TemporaryDirectory() as temp_dir:
+                auth_db = Path(temp_dir) / "auth.sqlite3"
+                AuthStore(auth_db).set_token(
+                    "google",
+                    _GmailApiHandler.expected_token,
+                )
+
+                text = module.get_thread_text(
+                    auth_db=auth_db,
+                    config_path=None,
+                    provider="google",
+                    api_base_url=api_base_url,
+                    thread_id="thread-1",
+                    max_messages=5,
+                )
+
+        self.assertIn("Thread thread-1:", text)
+        self.assertIn("Project update", text)
+
+
+class SpotifyFastMcpWrapperTests(unittest.TestCase):
+    """Tests for the local FastMCP Spotify Web API read wrapper."""
+
+    def test_search_formats_tracks_and_artists(self) -> None:
+        module = _spotify_fastmcp_module()
+        with _spotify_api_server() as api_base_url:
+            with TemporaryDirectory() as temp_dir:
+                auth_db = Path(temp_dir) / "auth.sqlite3"
+                AuthStore(auth_db).set_token(
+                    "spotify",
+                    _SpotifyApiHandler.expected_token,
+                )
+
+                text = module.search_text(
+                    auth_db=auth_db,
+                    config_path=None,
+                    provider="spotify",
+                    api_base_url=api_base_url,
+                    query="Daft Punk",
+                    types="track,artist",
+                    limit=5,
+                )
+
+        self.assertEqual(_SpotifyApiHandler.last_authorization, "Bearer test-token")
+        self.assertEqual(_SpotifyApiHandler.last_query.get("q"), ["Daft Punk"])
+        self.assertEqual(_SpotifyApiHandler.last_query.get("type"), ["track,artist"])
+        self.assertIn('Spotify search results for "Daft Punk":', text)
+        self.assertIn("One More Time by Daft Punk", text)
+        self.assertIn("artist: Daft Punk", text)
+
+    def test_current_playback_formats_current_track(self) -> None:
+        module = _spotify_fastmcp_module()
+        with _spotify_api_server() as api_base_url:
+            with TemporaryDirectory() as temp_dir:
+                auth_db = Path(temp_dir) / "auth.sqlite3"
+                AuthStore(auth_db).set_token(
+                    "spotify",
+                    _SpotifyApiHandler.expected_token,
+                )
+
+                text = module.current_playback_text(
+                    auth_db=auth_db,
+                    config_path=None,
+                    provider="spotify",
+                    api_base_url=api_base_url,
+                )
+
+        self.assertIn("Spotify current playback: playing", text)
+        self.assertIn("One More Time by Daft Punk", text)
+        self.assertIn("Desk Speakers", text)
+
+    def test_recently_played_formats_tracks(self) -> None:
+        module = _spotify_fastmcp_module()
+        with _spotify_api_server() as api_base_url:
+            with TemporaryDirectory() as temp_dir:
+                auth_db = Path(temp_dir) / "auth.sqlite3"
+                AuthStore(auth_db).set_token(
+                    "spotify",
+                    _SpotifyApiHandler.expected_token,
+                )
+
+                text = module.recently_played_text(
+                    auth_db=auth_db,
+                    config_path=None,
+                    provider="spotify",
+                    api_base_url=api_base_url,
+                    limit=3,
+                )
+
+        self.assertEqual(_SpotifyApiHandler.last_query.get("limit"), ["3"])
+        self.assertIn("Spotify recently played:", text)
+        self.assertIn("One More Time by Daft Punk", text)
+
+    def test_list_playlists_formats_playlists(self) -> None:
+        module = _spotify_fastmcp_module()
+        with _spotify_api_server() as api_base_url:
+            with TemporaryDirectory() as temp_dir:
+                auth_db = Path(temp_dir) / "auth.sqlite3"
+                AuthStore(auth_db).set_token(
+                    "spotify",
+                    _SpotifyApiHandler.expected_token,
+                )
+
+                text = module.list_playlists_text(
+                    auth_db=auth_db,
+                    config_path=None,
+                    provider="spotify",
+                    api_base_url=api_base_url,
+                    limit=2,
+                    offset=0,
+                )
+
+        self.assertIn("Spotify playlists:", text)
+        self.assertIn("Focus Mix", text)
+        self.assertIn("owner=Saket", text)
+
+
 class McpTests(unittest.TestCase):
     """Tests for MCP stdio tool loading and execution."""
 
@@ -1256,6 +3450,57 @@ class McpTests(unittest.TestCase):
                 client.list_tools()
 
         self.assertIn("missing dependency", str(context.exception))
+
+    def test_gmail_mcp_tool_capability_is_email_read_only(self) -> None:
+        capability = _mcp_tool_capability(
+            McpServerSettings(name="gmail", command="python"),
+            "search_messages",
+        )
+
+        self.assertIsNotNone(capability)
+        assert capability is not None
+        self.assertEqual(capability.domain, "email")
+        self.assertEqual(capability.operation, "search_messages")
+        self.assertTrue(capability.read_only)
+
+    def test_spotify_mcp_tool_capability_is_music_read_only(self) -> None:
+        capability = _mcp_tool_capability(
+            McpServerSettings(name="spotify", command="python"),
+            "recently_played",
+        )
+
+        self.assertIsNotNone(capability)
+        assert capability is not None
+        self.assertEqual(capability.domain, "music")
+        self.assertEqual(capability.operation, "recently_played")
+        self.assertTrue(capability.read_only)
+
+    def test_mcp_client_times_out_when_stdio_server_is_silent(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            server_path = Path(temp_dir) / "silent_server.py"
+            server_path.write_text(
+                "import sys\n"
+                "import time\n"
+                "sys.stderr.write('still starting\\n')\n"
+                "sys.stderr.flush()\n"
+                "time.sleep(60)\n",
+                encoding="utf-8",
+            )
+            server = McpServerSettings(
+                name="silent",
+                command=sys.executable,
+                args=(str(server_path),),
+            )
+            client = McpStdioClient(server, timeout_seconds=1)
+
+            started_at = time.monotonic()
+            with self.assertRaises(RuntimeError) as context:
+                client.list_tools()
+            elapsed = time.monotonic() - started_at
+
+        self.assertLess(elapsed, 3)
+        self.assertIn("did not respond before timeout", str(context.exception))
+        self.assertIn("still starting", str(context.exception))
 
     def test_stdio_python_command_resolves_to_current_interpreter(self) -> None:
         self.assertEqual(_resolved_command("python"), sys.executable)
@@ -1519,7 +3764,6 @@ url = "{server_url}"
         self.assertFalse(result.success)
         self.assertEqual(result.error, "The caller does not have permission")
 
-
     def test_mcp_tool_is_registered_from_settings(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -1562,6 +3806,7 @@ requires_approval = false
 
 [[mcp.servers.tools]]
 name = "echo"
+argument_hints = "Pass the exact text to echo."
 risk_level = "medium"
 requires_approval = true
 """.strip(),
@@ -1573,6 +3818,7 @@ requires_approval = true
             tool = registry.get("demo_mcp.echo")
 
         self.assertEqual(tool.risk_level, "medium")
+        self.assertEqual(tool.argument_hints, "Pass the exact text to echo.")
         self.assertTrue(tool.requires_approval)
 
     def test_orchestrator_can_execute_validated_mcp_tool_plan(self) -> None:
@@ -1721,7 +3967,7 @@ args = ["{server_path}"]
         trace_types = [event.event_type for event in result.trace]
         self.assertIn("argument_resolution.failed", trace_types)
 
-    def test_fake_local_fallback_can_execute_mcp_echo_tool(self) -> None:
+    def test_fake_local_fallback_does_not_route_mcp_echo_tool(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             config_path = root / "jarvis.toml"
@@ -1744,10 +3990,10 @@ args = ["{server_path}"]
             )
 
         tool_names = [item.tool_name for item in result.step_results]
-        self.assertIn("demo_mcp.echo", tool_names)
-        self.assertIn("demo echo: echo hello from mcp", result.final_response)
+        self.assertNotIn("demo_mcp.echo", tool_names)
+        self.assertIn("memory.search", tool_names)
 
-    def test_fake_local_fallback_generates_text_before_mcp_echo(self) -> None:
+    def test_fake_local_fallback_does_not_generate_text_before_mcp_echo(self) -> None:
         with TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             config_path = root / "jarvis.toml"
@@ -1770,13 +4016,9 @@ args = ["{server_path}"]
             )
 
         tool_names = [item.tool_name for item in result.step_results]
-        self.assertIn("general.generate_text", tool_names)
-        self.assertIn("demo_mcp.echo", tool_names)
-        self.assertIn(
-            "demo echo: Generated text for: Generate a fun fact about JarvisOS "
-            "and echo it",
-            result.final_response,
-        )
+        self.assertNotIn("general.generate_text", tool_names)
+        self.assertNotIn("demo_mcp.echo", tool_names)
+        self.assertIn("memory.search", tool_names)
 
 
 def _write_notes_plugin(root: Path) -> Path:
@@ -1836,6 +4078,36 @@ def _google_calendar_fastmcp_module():
         / "google_calendar_fastmcp_server.py"
     )
     spec = importlib.util.spec_from_file_location("google_calendar_fastmcp_server", path)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def _google_gmail_fastmcp_module():
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "examples"
+        / "mcp"
+        / "google_gmail_fastmcp_server.py"
+    )
+    spec = importlib.util.spec_from_file_location("google_gmail_fastmcp_server", path)
+    assert spec is not None
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def _spotify_fastmcp_module():
+    path = (
+        Path(__file__).resolve().parents[1]
+        / "examples"
+        / "mcp"
+        / "spotify_fastmcp_server.py"
+    )
+    spec = importlib.util.spec_from_file_location("spotify_fastmcp_server", path)
     assert spec is not None
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
@@ -1918,6 +4190,201 @@ class _CalendarApiHandler(BaseHTTPRequestHandler):
 
     def log_message(self, format: str, *args) -> None:
         return
+
+
+@contextmanager
+def _gmail_api_server():
+    _GmailApiHandler.reset()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _GmailApiHandler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        yield f"http://{host}:{port}/gmail/v1"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+class _GmailApiHandler(BaseHTTPRequestHandler):
+    """Local Gmail REST stand-in for wrapper tests."""
+
+    expected_token = "test-token"
+    last_authorization: str | None = None
+    last_query: dict[str, list[str]] = {}
+    last_list_query: dict[str, list[str]] = {}
+    last_message_query: dict[str, list[str]] = {}
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.last_authorization = None
+        cls.last_query = {}
+        cls.last_list_query = {}
+        cls.last_message_query = {}
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        type(self).last_authorization = self.headers.get("Authorization")
+        type(self).last_query = parse_qs(parsed.query)
+        expected = f"Bearer {self.expected_token}"
+        if self.headers.get("Authorization") != expected:
+            self._write_json({"error": {"message": "unauthorized"}}, status=401)
+            return
+        if parsed.path == "/gmail/v1/users/me/messages":
+            type(self).last_list_query = parse_qs(parsed.query)
+            self._write_json({"messages": [{"id": "msg-1", "threadId": "thread-1"}]})
+            return
+        if parsed.path == "/gmail/v1/users/me/messages/msg-1":
+            type(self).last_message_query = parse_qs(parsed.query)
+            self._write_json(_gmail_message("msg-1", "thread-1"))
+            return
+        if parsed.path == "/gmail/v1/users/me/threads/thread-1":
+            self._write_json(
+                {
+                    "id": "thread-1",
+                    "messages": [_gmail_message("msg-1", "thread-1")],
+                }
+            )
+            return
+        self.send_error(404)
+
+    def _write_json(self, payload: dict[str, object], status: int = 200) -> None:
+        encoded = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def log_message(self, format: str, *args) -> None:
+        return
+
+
+def _gmail_message(message_id: str, thread_id: str) -> dict[str, object]:
+    return {
+        "id": message_id,
+        "threadId": thread_id,
+        "snippet": "Here is the project update.",
+        "payload": {
+            "headers": [
+                {"name": "From", "value": "Jordan <jordan@example.com>"},
+                {"name": "To", "value": "Saket <saket@example.com>"},
+                {"name": "Subject", "value": "Project update"},
+                {"name": "Date", "value": "Sun, 5 Jul 2026 09:00:00 -0700"},
+            ]
+        },
+    }
+
+
+@contextmanager
+def _spotify_api_server():
+    _SpotifyApiHandler.reset()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _SpotifyApiHandler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        yield f"http://{host}:{port}/v1"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+class _SpotifyApiHandler(BaseHTTPRequestHandler):
+    """Local Spotify Web API stand-in for wrapper tests."""
+
+    expected_token = "test-token"
+    last_authorization: str | None = None
+    last_query: dict[str, list[str]] = {}
+
+    @classmethod
+    def reset(cls) -> None:
+        cls.last_authorization = None
+        cls.last_query = {}
+
+    def do_GET(self) -> None:
+        parsed = urlparse(self.path)
+        type(self).last_authorization = self.headers.get("Authorization")
+        type(self).last_query = parse_qs(parsed.query)
+        expected = f"Bearer {self.expected_token}"
+        if self.headers.get("Authorization") != expected:
+            self._write_json({"error": {"message": "unauthorized"}}, status=401)
+            return
+        if parsed.path == "/v1/search":
+            self._write_json(_spotify_search_payload())
+            return
+        if parsed.path == "/v1/me/player":
+            self._write_json(
+                {
+                    "is_playing": True,
+                    "device": {"name": "Desk Speakers"},
+                    "item": _spotify_track(),
+                }
+            )
+            return
+        if parsed.path == "/v1/me/player/recently-played":
+            self._write_json(
+                {
+                    "items": [
+                        {
+                            "track": _spotify_track(),
+                            "played_at": "2026-07-05T09:00:00Z",
+                        }
+                    ]
+                }
+            )
+            return
+        if parsed.path == "/v1/me/playlists":
+            self._write_json(
+                {
+                    "items": [
+                        {
+                            "id": "playlist-1",
+                            "name": "Focus Mix",
+                            "owner": {"display_name": "Saket"},
+                        }
+                    ]
+                }
+            )
+            return
+        self.send_error(404)
+
+    def _write_json(self, payload: dict[str, object], status: int = 200) -> None:
+        encoded = json.dumps(payload).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def log_message(self, format: str, *args) -> None:
+        return
+
+
+def _spotify_search_payload() -> dict[str, object]:
+    return {
+        "tracks": {"items": [_spotify_track()]},
+        "artists": {
+            "items": [
+                {
+                    "id": "artist-1",
+                    "name": "Daft Punk",
+                    "type": "artist",
+                }
+            ]
+        },
+    }
+
+
+def _spotify_track() -> dict[str, object]:
+    return {
+        "id": "track-1",
+        "name": "One More Time",
+        "artists": [{"name": "Daft Punk"}],
+        "type": "track",
+    }
 
 
 @contextmanager
@@ -2049,6 +4516,20 @@ def _oauth_server():
 
 
 @contextmanager
+def _oauth_error_server():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _OAuthErrorHandler)
+    host, port = server.server_address
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://{host}:{port}/token"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+
+@contextmanager
 def _tokeninfo_server():
     server = ThreadingHTTPServer(("127.0.0.1", 0), _TokenInfoHandler)
     thread = Thread(target=server.serve_forever, daemon=True)
@@ -2136,6 +4617,25 @@ class _OAuthHandler(BaseHTTPRequestHandler):
         return
 
 
+class _OAuthErrorHandler(BaseHTTPRequestHandler):
+    """Local OAuth endpoint that returns a redacted provider error."""
+
+    def do_POST(self) -> None:
+        payload = {
+            "error": "invalid_request",
+            "error_description": "client_secret is missing.",
+        }
+        encoded = json.dumps(payload).encode("utf-8")
+        self.send_response(400)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(encoded)))
+        self.end_headers()
+        self.wfile.write(encoded)
+
+    def log_message(self, format: str, *args) -> None:
+        return
+
+
 def _callback_browser_opener(auth_url: str) -> bool:
     _OAuthHandler.opened_urls.append(auth_url)
     parsed = urlparse(auth_url)
@@ -2162,6 +4662,114 @@ def _free_port() -> int:
         return int(item.getsockname()[1])
 
 
+class GeminiProviderTests(unittest.TestCase):
+    """Tests for the optional Gemini model-provider adapter."""
+
+    def test_gemini_provider_uses_stateless_interactions_api(self) -> None:
+        class FakeInteractions:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+
+            def create(self, **kwargs: object) -> object:
+                self.calls.append(kwargs)
+                return type("Interaction", (), {"output_text": "Gemini reply"})()
+
+        class FakeClient:
+            created_with: str | None = None
+            http_options: dict[str, object] | None = None
+            interactions = FakeInteractions()
+
+            def __init__(self, api_key: str, **kwargs: object) -> None:
+                type(self).created_with = api_key
+                type(self).http_options = kwargs.get("http_options")
+
+        provider = GeminiProvider("gemini-3.5-flash")
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}, clear=False):
+            with patch(
+                "jarvis.models.router._load_gemini_client",
+                return_value=FakeClient,
+            ):
+                response = provider.generate(
+                    ModelRequest(
+                        goal="Answer the user.",
+                        messages=["Relevant context."],
+                        system_prompt="Be concise.",
+                    )
+                )
+
+        self.assertEqual(response.text, "Gemini reply")
+        self.assertEqual(response.model_name, "gemini/gemini-3.5-flash")
+        self.assertEqual(FakeClient.created_with, "test-key")
+        self.assertEqual(
+            FakeClient.http_options,
+            {"client_args": {"timeout": 60.0}},
+        )
+        self.assertEqual(
+            FakeClient.interactions.calls,
+            [
+                {
+                    "model": "gemini-3.5-flash",
+                    "input": "Relevant context.\n\nAnswer the user.",
+                    "system_instruction": "Be concise.",
+                    "store": False,
+                }
+            ],
+        )
+
+    def test_gemini_provider_reports_missing_api_key(self) -> None:
+        provider = GeminiProvider("gemini-3.5-flash")
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(ModelProviderError, "GEMINI_API_KEY"):
+                provider.generate(ModelRequest(goal="Hello"))
+
+    def test_gemini_provider_reports_empty_response(self) -> None:
+        class FakeInteractions:
+            def create(self, **kwargs: object) -> object:
+                return type("Interaction", (), {"output_text": ""})()
+
+        class FakeClient:
+            def __init__(self, api_key: str, **kwargs: object) -> None:
+                self.interactions = FakeInteractions()
+
+        provider = GeminiProvider("gemini-3.5-flash")
+        with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}, clear=False):
+            with patch(
+                "jarvis.models.router._load_gemini_client",
+                return_value=FakeClient,
+            ):
+                with self.assertRaisesRegex(ModelProviderError, "empty response"):
+                    provider.generate(ModelRequest(goal="Hello"))
+
+    def test_router_registers_only_configured_or_routed_gemini_models(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "jarvis.toml"
+            config_path.write_text(
+                """
+[models.roles]
+planner = "gemini/gemini-3.5-flash"
+
+[providers.gemini]
+models = ["gemini-3.1-pro-preview"]
+api_key_env = "CUSTOM_GEMINI_KEY"
+timeout_seconds = 30
+""".strip(),
+                encoding="utf-8",
+            )
+            router = default_model_router(load_settings(config_path))
+
+        self.assertIn("gemini/gemini-3.5-flash", router.list())
+        self.assertIn("gemini/gemini-3.1-pro-preview", router.list())
+
+    def test_gemini_key_does_not_register_a_model_without_configuration(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "jarvis.toml"
+            config_path.write_text("", encoding="utf-8")
+            with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}, clear=False):
+                router = default_model_router(load_settings(config_path))
+
+        self.assertNotIn("gemini/gemini-3.5-flash", router.list())
+
+
 class StaticModelProvider(ModelProvider):
     """Model provider that returns a static response for tests."""
 
@@ -2185,6 +4793,20 @@ class SequencedModelProvider(ModelProvider):
     def generate(self, request: ModelRequest) -> ModelResponse:
         text = self._responses.pop(0)
         return ModelResponse(text=text, model_name=self.name)
+
+
+class CapturingModelProvider(ModelProvider):
+    """Model provider that records the last request it received."""
+
+    name = "capturing-model"
+
+    def __init__(self, text: str) -> None:
+        self._text = text
+        self.last_request: ModelRequest | None = None
+
+    def generate(self, request: ModelRequest) -> ModelResponse:
+        self.last_request = request
+        return ModelResponse(text=self._text, model_name=self.name)
 
 
 class FailingAfterFirstModelProvider(ModelProvider):

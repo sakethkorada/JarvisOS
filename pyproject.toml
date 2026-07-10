@@ -8,6 +8,8 @@ dependencies = []
 
 [project.optional-dependencies]
 mcp = ["fastmcp>=2.0.0"]
+gemini = ["google-genai>=2.3.0,<3"]
+api = ["google-genai>=2.3.0,<3"]
 
 [project.scripts]
 jarvis = "jarvis.cli:main"
@@ -18,3 +20,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+jarvis = ["prompts/*.md"]

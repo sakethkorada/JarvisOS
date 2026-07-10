@@ -12,7 +12,7 @@ import json
 import os
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
@@ -29,6 +29,7 @@ from jarvis.storage.auth import AuthStore  # noqa: E402
 
 
 DEFAULT_API_BASE_URL = "https://www.googleapis.com/calendar/v3"
+DEFAULT_AUTH_DB = Path(".jarvis/auth.sqlite3")
 
 
 def main() -> None:
@@ -59,12 +60,14 @@ def create_mcp_server(
     @mcp.tool()
     def list_calendars(max_results: int = 50) -> str:
         """List calendars available to the authenticated Google user."""
-        return list_calendars_text(
-            auth_db=auth_db,
-            config_path=config_path,
-            provider=provider,
-            api_base_url=api_base_url,
-            max_results=max_results,
+        return _tool_text(
+            lambda: list_calendars_text(
+                auth_db=auth_db,
+                config_path=config_path,
+                provider=provider,
+                api_base_url=api_base_url,
+                max_results=max_results,
+            )
         )
 
     @mcp.tool()
@@ -74,16 +77,21 @@ def create_mcp_server(
         end_time: str | None = None,
         max_results: int = 10,
     ) -> str:
-        """List events from a Google Calendar using optional time bounds."""
-        return list_events_text(
-            auth_db=auth_db,
-            config_path=config_path,
-            provider=provider,
-            api_base_url=api_base_url,
-            calendar_id=calendar_id,
-            start_time=start_time,
-            end_time=end_time,
-            max_results=max_results,
+        """List calendar events for scheduling or meeting-context requests.
+
+        Returns event titles and times, not related email or notes.
+        """
+        return _tool_text(
+            lambda: list_events_text(
+                auth_db=auth_db,
+                config_path=config_path,
+                provider=provider,
+                api_base_url=api_base_url,
+                calendar_id=calendar_id,
+                start_time=start_time,
+                end_time=end_time,
+                max_results=max_results,
+            )
         )
 
     return mcp
@@ -157,18 +165,29 @@ def list_events_text(
     return "\n".join(lines)
 
 
+def _tool_text(handler: Callable[[], str]) -> str:
+    """Return tool text while keeping auth errors in-band for MCP clients."""
+    try:
+        return handler()
+    except RuntimeError as exc:
+        return f"AUTH_ERROR: {exc}"
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="JarvisOS Google Calendar MCP server.")
     parser.add_argument(
         "--auth-db",
         type=Path,
-        default=Path(".jarvis/auth.sqlite3"),
+        default=DEFAULT_AUTH_DB,
         help="Path to the JarvisOS auth SQLite database.",
     )
     parser.add_argument(
         "--config",
         type=Path,
-        help="Optional JarvisOS config path for auth DB and silent token refresh.",
+        help=(
+            "Optional JarvisOS config path for auth DB and silent token refresh. "
+            "When omitted, the global auth profile is used."
+        ),
     )
     parser.add_argument(
         "--provider",
@@ -202,7 +221,8 @@ def _fastmcp_class() -> Any:
 def _access_token(auth_db: Path, config_path: Path | None, provider: str) -> str:
     auth_store = AuthStore(auth_db)
     provider_settings = None
-    if config_path is not None:
+    should_load_auth_profile = config_path is not None or auth_db == DEFAULT_AUTH_DB
+    if should_load_auth_profile:
         settings = load_settings(config_path)
         auth_store = AuthStore(settings.auth.database_path)
         provider_settings = next(
@@ -222,12 +242,26 @@ def _access_token(auth_db: Path, config_path: Path | None, provider: str) -> str
         and record.refresh_token
         and auth_store.token_is_expired(record)
     ):
-        refreshed = OAuthManager((provider_settings,), auth_store).refresh(
-            provider_settings,
-            record,
-        )
+        try:
+            refreshed = OAuthManager((provider_settings,), auth_store).refresh(
+                provider_settings,
+                record,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                f"Stored token for {provider} is expired and refresh failed. "
+                f"{exc} "
+                "Check `python -m jarvis auth debug google --json`, set any "
+                "missing client secret environment variable, "
+                "then retry the Calendar tool."
+            ) from exc
         if refreshed is not None:
             return refreshed.access_token
+        raise RuntimeError(
+            f"Stored token for {provider} is expired and could not be refreshed. "
+            "Check `python -m jarvis auth debug google --json`, set any missing "
+            "client secret environment variable, then retry the Calendar tool."
+        )
     return record.access_token
 
 

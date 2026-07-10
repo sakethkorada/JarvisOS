@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 import re
 from typing import Any
 
@@ -32,6 +33,17 @@ def _task_create_summary(arguments: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _system_current_datetime(arguments: dict[str, Any]) -> dict[str, Any]:
+    """Return the current local date and time for time-aware answers."""
+    now = datetime.now().astimezone()
+    return {
+        "text": now.strftime("%A, %B %d, %Y %I:%M %p %Z"),
+        "date": now.date().isoformat(),
+        "datetime": now.isoformat(),
+        "timezone": now.tzname(),
+    }
+
+
 def _general_generate_text(
     arguments: dict[str, Any],
     context: ToolExecutionContext,
@@ -40,7 +52,12 @@ def _general_generate_text(
     extra_context = str(arguments.get("context", "")).strip()
     if not instruction:
         raise ValueError("Instruction is required.")
-    if context.model_name == "fake-local":
+    selected_model = context.models.resolve_provider_name(
+        explicit_provider_name=context.model_name,
+        mode=context.model_mode,
+        role="general",
+    )
+    if selected_model == "fake-local":
         return {
             "text": f"Generated text for: {instruction}",
             "model": "fake-local",
@@ -61,7 +78,7 @@ def _general_generate_text(
             "useful text for the requested task using only the given context."
         ),
     )
-    response = context.models.run(request, context.model_name)
+    response = context.models.run(request, context.model_name, role="general")
     text = response.text.strip()
     if not text:
         raise ValueError("Model returned empty generated text.")
@@ -150,29 +167,6 @@ def _memory_search(
     }
 
 
-def _calendar_search_events(arguments: dict[str, Any]) -> dict[str, Any]:
-    query = str(arguments.get("query", "")).strip()
-    normalized = query.lower()
-    if "jordan" in normalized or "meeting" in normalized:
-        return {
-            "query": query,
-            "events": [
-                {
-                    "title": "Jordan project sync",
-                    "time": "tomorrow at 2:00 PM",
-                    "attendees": ["Jordan", "User"],
-                    "notes": "Review project timeline and open questions.",
-                }
-            ],
-            "source": "demo-calendar",
-        }
-    return {
-        "query": query,
-        "events": [],
-        "note": "Calendar integration is not configured yet.",
-    }
-
-
 def default_tool_registry(
     memory_store: MemoryStore | None = None,
     task_store: TaskStore | None = None,
@@ -182,16 +176,39 @@ def default_tool_registry(
     registry.register(
         ToolSpec(
             name="task.breakdown",
-            description="Break a simple goal into generic execution steps.",
+            description=(
+                "Break a goal into generic execution steps. Use only when the "
+                "user explicitly asks for a task breakdown or step-by-step plan; "
+                "do not use as filler after provider tools."
+            ),
         ),
         _task_breakdown,
     )
     registry.register(
         ToolSpec(
             name="task.create_summary",
-            description="Create a lightweight response from gathered context.",
+            description=(
+                "Create a lightweight fallback response when no better provider, "
+                "plugin, memory, or language tool can satisfy the request. Final "
+                "synthesis normally summarizes completed tool results."
+            ),
         ),
         _task_create_summary,
+    )
+    registry.register(
+        ToolSpec(
+            name="system.current_datetime",
+            description=(
+                "Return the current local date, time, timezone, and ISO datetime. "
+                "Use for questions about today's date, current time, or resolving "
+                "time-sensitive context."
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {},
+            },
+        ),
+        _system_current_datetime,
     )
     registry.register_contextual(
         ToolSpec(
@@ -214,15 +231,12 @@ def default_tool_registry(
         registry.register(
             ToolSpec(
                 name="memory.search",
-                description="Search local memory records.",
+                description=(
+                    "Search durable local user memory such as preferences, facts, "
+                    "and remembered context. This is not web search and does not "
+                    "provide current time."
+                ),
             ),
             lambda arguments: _memory_search(arguments, memory_store),
         )
-    registry.register(
-        ToolSpec(
-            name="calendar.search_events",
-            description="Search calendar events.",
-        ),
-        _calendar_search_events,
-    )
     return registry

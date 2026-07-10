@@ -22,7 +22,11 @@ from jarvis.tools import ToolRegistry, default_tool_registry
 def create_default_orchestrator(settings: JarvisSettings | None = None) -> Orchestrator:
     """Create the default local runtime with built-in registries."""
     settings = settings or load_settings()
-    memory_store = MemoryStore(settings.memory.database_path)
+    memory_store = (
+        MemoryStore(settings.memory.database_path)
+        if settings.memory.enabled
+        else None
+    )
     task_store = TaskStore(settings.tasks.database_path)
     approval_store = ApprovalStore(settings.approvals.database_path)
     tools = default_tool_registry(memory_store, task_store)
@@ -37,6 +41,7 @@ def create_default_orchestrator(settings: JarvisSettings | None = None) -> Orche
     prompts = PromptLibrary(
         planner_prompt_path=settings.prompts.planner_path,
         synthesis_prompt_path=settings.prompts.synthesis_path,
+        tool_use_prompt_path=settings.prompts.tool_use_path,
     )
     return Orchestrator(
         agents=default_agent_registry(),
@@ -45,8 +50,13 @@ def create_default_orchestrator(settings: JarvisSettings | None = None) -> Orche
         policies=PolicyEngine(),
         planner_prompt=prompts.planner_prompt(),
         synthesis_prompt=prompts.synthesis_prompt(),
+        tool_use_prompt=prompts.tool_use_prompt(),
         approval_store=approval_store,
-        memory_extractor=MemoryExtractor() if settings.memory.auto_extract else None,
+        memory_extractor=(
+            MemoryExtractor()
+            if settings.memory.enabled and settings.memory.auto_extract
+            else None
+        ),
         auto_write_memory=settings.memory.auto_write,
     )
 
@@ -57,7 +67,11 @@ def create_default_tool_registry(
     """Create the built-in tool registry plus configured local plugins."""
     settings = settings or load_settings()
     tools = default_tool_registry(
-        MemoryStore(settings.memory.database_path),
+        (
+            MemoryStore(settings.memory.database_path)
+            if settings.memory.enabled
+            else None
+        ),
         TaskStore(settings.tasks.database_path),
     )
     load_plugins(settings.plugins.paths, tools)

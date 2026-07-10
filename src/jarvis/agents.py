@@ -32,9 +32,28 @@ def default_agent_registry() -> AgentRegistry:
     registry = AgentRegistry()
     registry.register(
         AgentSpec(
+            name="planner",
+            description="Chooses a validated plan from registered capabilities.",
+            allowed_tools=("*",),
+            execution_role="planner",
+            output_contract="execution_plan_json",
+        )
+    )
+    registry.register(
+        AgentSpec(
+            name="tool_use",
+            description="Builds JSON arguments for one selected tool.",
+            allowed_tools=("*",),
+            execution_role="tool_use",
+            output_contract="tool_arguments_json",
+        )
+    )
+    registry.register(
+        AgentSpec(
             name="orchestrator",
             description="Creates simple execution plans and summarizes results.",
             allowed_tools=("task.breakdown", "task.create", "task.create_summary"),
+            execution_role="orchestrator",
         )
     )
     registry.register(
@@ -42,6 +61,7 @@ def default_agent_registry() -> AgentRegistry:
             name="general",
             description="Generates and transforms text with the selected model.",
             allowed_tools=("general.generate_text",),
+            execution_role="general",
         )
     )
     registry.register(
@@ -49,13 +69,39 @@ def default_agent_registry() -> AgentRegistry:
             name="memory",
             description="Retrieves lightweight local context.",
             allowed_tools=("memory.search",),
+            execution_role="memory",
+        )
+    )
+    registry.register(
+        AgentSpec(
+            name="system",
+            description="Reads safe local runtime context.",
+            allowed_tools=("system.current_datetime",),
+            execution_role="system",
         )
     )
     registry.register(
         AgentSpec(
             name="calendar",
-            description="Handles calendar lookups in the demo runtime.",
-            allowed_tools=("calendar.search_events",),
+            description="Handles configured calendar tools.",
+            allowed_tools=(),
+            execution_role="tool_use",
+        )
+    )
+    registry.register(
+        AgentSpec(
+            name="email",
+            description="Handles configured email tools.",
+            allowed_tools=(),
+            execution_role="tool_use",
+        )
+    )
+    registry.register(
+        AgentSpec(
+            name="music",
+            description="Handles configured music tools.",
+            allowed_tools=(),
+            execution_role="tool_use",
         )
     )
     registry.register(
@@ -63,6 +109,7 @@ def default_agent_registry() -> AgentRegistry:
             name="plugin",
             description="Runs tools provided by user-managed local plugins.",
             allowed_tools=("*",),
+            execution_role="tool_use",
         )
     )
     registry.register(
@@ -70,6 +117,8 @@ def default_agent_registry() -> AgentRegistry:
             name="synthesis",
             description="Writes the final answer from confirmed tool results.",
             allowed_tools=(),
+            execution_role="synthesis",
+            output_contract="final_answer_text",
         )
     )
     return registry

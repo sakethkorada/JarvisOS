@@ -18,6 +18,9 @@ venv/
 jarvis.toml
 mcp-demo.toml
 google-calendar-fastmcp.toml
+google-gmail-fastmcp.toml
+google-workspace-fastmcp.toml
+spotify-fastmcp.toml
 local*.toml
 
 # Runtime state

@@ -15,9 +15,11 @@ class PromptLibrary:
         self,
         planner_prompt_path: Path | None = None,
         synthesis_prompt_path: Path | None = None,
+        tool_use_prompt_path: Path | None = None,
     ) -> None:
         self._planner_prompt_path = planner_prompt_path
         self._synthesis_prompt_path = synthesis_prompt_path
+        self._tool_use_prompt_path = tool_use_prompt_path
 
     def planner_prompt(self) -> str:
         """Return the planner system prompt."""
@@ -31,6 +33,13 @@ class PromptLibrary:
         return _read_prompt(
             self._synthesis_prompt_path,
             DEFAULT_PROMPT_DIR / "synthesis.md",
+        )
+
+    def tool_use_prompt(self) -> str:
+        """Return the ToolUseAgent system prompt."""
+        return _read_prompt(
+            self._tool_use_prompt_path,
+            DEFAULT_PROMPT_DIR / "tool_use.md",
         )
 
 

@@ -3,20 +3,18 @@
 # uv pip install fastmcp
 #
 # Before using this server, authenticate Google through JarvisOS once so your
-# configured auth database contains a stored provider token:
+# global auth profile points at a stored provider token:
 # python -m jarvis auth debug google
 #
-# The --config argument should point to your local JarvisOS config that contains
-# the google OAuth provider. The MCP subprocess uses it only to find the auth DB
-# and silently refresh expired tokens.
+# The MCP subprocess uses the global JarvisOS auth profile by default, so this
+# config only enables the Calendar tools. Set JARVIS_AUTH_PROFILE or add
+# [auth] to jarvis.toml/.jarvis/auth.toml when provider metadata is needed.
 
 [[mcp.servers]]
 name = "google_calendar"
 command = "python"
 args = [
   "examples/mcp/google_calendar_fastmcp_server.py",
-  "--config",
-  "jarvis.toml",
   "--provider",
   "google",
 ]
@@ -25,10 +23,16 @@ requires_approval = false
 
 [[mcp.servers.tools]]
 name = "list_calendars"
+argument_hints = "No arguments are needed. Use this when the user asks which calendars are available."
 risk_level = "low"
 requires_approval = false
 
 [[mcp.servers.tools]]
 name = "list_events"
+argument_hints = """
+Use calendar_id = "primary" unless the user named a specific calendar.
+For relative ranges, return RFC3339/ISO datetimes based on current_datetime.
+If the user asks for upcoming events without a range, use the next 7 days.
+"""
 risk_level = "low"
 requires_approval = false

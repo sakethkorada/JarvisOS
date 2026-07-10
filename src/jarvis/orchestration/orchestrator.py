@@ -6,16 +6,23 @@ from dataclasses import replace
 
 from jarvis.agents import AgentRegistry
 from jarvis.contracts import (
+    AgentSpec,
     MemoryCandidate,
     PlanStep,
     RunResult,
     ToolCall,
     ToolExecutionContext,
     ToolResult,
+    ToolSpec,
     TraceEvent,
     new_id,
 )
 from jarvis.models import ModelRouter
+from jarvis.orchestration.arguments import (
+    DEFAULT_TOOL_USE_PROMPT,
+    ToolUseAgent,
+    ToolUseFeedback,
+)
 from jarvis.orchestration.planner import Planner
 from jarvis.orchestration.synthesizer import Synthesizer
 from jarvis.policies import PolicyEngine
@@ -35,6 +42,7 @@ class Orchestrator:
         policies: PolicyEngine,
         planner_prompt: str,
         synthesis_prompt: str,
+        tool_use_prompt: str = DEFAULT_TOOL_USE_PROMPT,
         approval_store: ApprovalStore | None = None,
         memory_extractor: MemoryExtractor | None = None,
         auto_write_memory: bool = False,
@@ -47,6 +55,7 @@ class Orchestrator:
         self._memory_extractor = memory_extractor
         self._auto_write_memory = auto_write_memory
         self._planner = Planner(agents, tools, models, planner_prompt)
+        self._tool_use_agent = ToolUseAgent(models, tool_use_prompt)
         self._synthesizer = Synthesizer(models, synthesis_prompt)
 
     def run(
@@ -66,12 +75,19 @@ class Orchestrator:
             model_name,
             model_mode,
         )
+        planner_model = self._models.resolve_provider_name(
+            explicit_provider_name=model_name,
+            mode=model_mode,
+            role="planner",
+        )
         trace.append(
             TraceEvent(
                 "planner.selected",
                 f"Created plan with {plan_source} planner.",
                 data={
-                    "model": model_name or "default",
+                    "model": planner_model,
+                    "model_override": model_name,
+                    "execution_role": "planner",
                     "source": plan_source,
                     "raw_planner_output": raw_planner_output,
                 },
@@ -92,21 +108,36 @@ class Orchestrator:
         for step in plan.steps:
             agent = self._agents.get(step.agent_name)
             tool = self._tools.get(step.tool_call.tool_name)
-            resolved_arguments, resolution_error = _resolve_arguments(
+            resolution = self._tool_use_agent.build(
+                goal,
+                tool,
                 step.tool_call.arguments,
-                tuple(results),
+                model_name=model_name,
+                model_mode=model_mode,
+                prior_results=tuple(results),
             )
             executable_step = replace(
                 step,
-                tool_call=ToolCall(step.tool_call.tool_name, resolved_arguments),
+                tool_call=ToolCall(step.tool_call.tool_name, resolution.arguments),
+            )
+            trace.append(
+                TraceEvent(
+                    "tool_use.resolved",
+                    f"Resolved arguments for {tool.name}.",
+                    data={
+                        "tool": tool.name,
+                        "arguments": resolution.arguments,
+                        "attempts": _tool_use_attempts_data(resolution.attempts),
+                    },
+                )
             )
 
-            if resolution_error is not None:
+            if resolution.error is not None:
                 result = ToolResult(
                     tool_name=tool.name,
                     output={},
                     success=False,
-                    error=resolution_error,
+                    error=resolution.error,
                 )
                 results.append(result)
                 completed_steps.append(replace(executable_step, status="failed"))
@@ -114,13 +145,17 @@ class Orchestrator:
                 trace.append(
                     TraceEvent(
                         "argument_resolution.failed",
-                        resolution_error,
-                        data={"tool": tool.name, "arguments": step.tool_call.arguments},
+                        resolution.error,
+                        data={
+                            "tool": tool.name,
+                            "arguments": step.tool_call.arguments,
+                            "error": resolution.error,
+                        },
                     )
                 )
                 continue
 
-            if "*" not in agent.allowed_tools and tool.name not in agent.allowed_tools:
+            if not _agent_can_use_tool(agent, tool):
                 result = ToolResult(
                     tool_name=tool.name,
                     output={},
@@ -130,7 +165,18 @@ class Orchestrator:
                 results.append(result)
                 completed_steps.append(replace(executable_step, status="failed"))
                 status = "failed"
-                trace.append(TraceEvent("step.failed", result.error or "Step failed."))
+                trace.append(
+                    TraceEvent(
+                        "step.failed",
+                        result.error or "Step failed.",
+                        data={
+                            "tool": result.tool_name,
+                            "arguments": executable_step.tool_call.arguments,
+                            "output": result.output,
+                            "error": result.error,
+                        },
+                    )
+                )
                 continue
 
             decision = self._policies.evaluate(tool)
@@ -192,6 +238,86 @@ class Orchestrator:
                 executable_step.tool_call,
                 context=execution_context,
             )
+            if _can_repair_execution_error(tool, result, model_name):
+                trace.append(
+                    TraceEvent(
+                        "tool_use.execution_retry.started",
+                        f"Retrying {tool.name} after tool execution failed.",
+                        data={
+                            "tool": tool.name,
+                            "arguments": executable_step.tool_call.arguments,
+                            "error": result.error,
+                            "output": result.output,
+                        },
+                    )
+                )
+                repair_resolution = self._tool_use_agent.build(
+                    goal,
+                    tool,
+                    executable_step.tool_call.arguments,
+                    model_name=model_name,
+                    model_mode=model_mode,
+                    prior_results=tuple(results),
+                    feedback=ToolUseFeedback(
+                        stage="execution",
+                        attempted_arguments=executable_step.tool_call.arguments,
+                        error=result.error or "Tool execution failed.",
+                        output=result.output,
+                    ),
+                )
+                trace.append(
+                    TraceEvent(
+                        "tool_use.execution_retry.resolved",
+                        f"Resolved retry arguments for {tool.name}.",
+                        data={
+                            "tool": tool.name,
+                            "arguments": repair_resolution.arguments,
+                            "error": repair_resolution.error,
+                            "attempts": _tool_use_attempts_data(
+                                repair_resolution.attempts
+                            ),
+                        },
+                    )
+                )
+                if repair_resolution.error is None:
+                    repaired_step = replace(
+                        executable_step,
+                        tool_call=ToolCall(
+                            executable_step.tool_call.tool_name,
+                            repair_resolution.arguments,
+                        ),
+                    )
+                    retry_decision = self._policies.evaluate(tool)
+                    trace.append(
+                        TraceEvent(
+                            "policy.evaluated",
+                            retry_decision.reason,
+                            data={
+                                "tool": tool.name,
+                                "status": retry_decision.status,
+                                "retry": True,
+                            },
+                        )
+                    )
+                    if retry_decision.allowed:
+                        result = self._tools.execute(
+                            repaired_step.tool_call,
+                            context=execution_context,
+                        )
+                        executable_step = repaired_step
+                        trace.append(
+                            TraceEvent(
+                                "tool_use.execution_retry.completed",
+                                f"Retried {tool.name}.",
+                                data={
+                                    "tool": tool.name,
+                                    "arguments": repaired_step.tool_call.arguments,
+                                    "success": result.success,
+                                    "error": result.error,
+                                    "output": result.output,
+                                },
+                            )
+                        )
             results.append(result)
             step_status = "completed" if result.success else "failed"
             completed_steps.append(replace(executable_step, status=step_status))
@@ -203,6 +329,7 @@ class Orchestrator:
                         "tool": result.tool_name,
                         "arguments": executable_step.tool_call.arguments,
                         "output": result.output,
+                        "error": result.error,
                     },
                 )
             )
@@ -222,6 +349,7 @@ class Orchestrator:
             goal=goal,
             plan=final_plan,
             results=tuple(results),
+            available_tools=self._tools.available_tools(),
             status=status,
             model_name=model_name,
             model_mode=model_mode,
@@ -322,66 +450,63 @@ class Orchestrator:
         return approval_ids
 
 
-def _resolve_arguments(
-    arguments: dict[str, object],
-    prior_results: tuple[ToolResult, ...],
-) -> tuple[dict[str, object], str | None]:
-    resolved: dict[str, object] = {}
-    for key, value in arguments.items():
-        resolved_value, error = _resolve_value(value, prior_results)
-        if error is not None:
-            return resolved, error
-        resolved[key] = resolved_value
-    return resolved, None
+def _agent_can_use_tool(agent: AgentSpec, tool: ToolSpec) -> bool:
+    """Return whether an agent can execute a tool spec."""
+    if "*" in agent.allowed_tools or tool.name in agent.allowed_tools:
+        return True
+    capability = tool.capability
+    return (
+        agent.name in {"calendar", "email", "music"}
+        and capability is not None
+        and capability.domain == agent.name
+    )
 
 
-def _resolve_value(
-    value: object,
-    prior_results: tuple[ToolResult, ...],
-) -> tuple[object, str | None]:
-    if isinstance(value, str):
-        return _resolve_string(value, prior_results)
-    if isinstance(value, list):
-        items: list[object] = []
-        for item in value:
-            resolved_item, error = _resolve_value(item, prior_results)
-            if error is not None:
-                return None, error
-            items.append(resolved_item)
-        return items, None
-    if isinstance(value, dict):
-        resolved_dict: dict[str, object] = {}
-        for key, item in value.items():
-            resolved_item, error = _resolve_value(item, prior_results)
-            if error is not None:
-                return None, error
-            resolved_dict[str(key)] = resolved_item
-        return resolved_dict, None
-    return value, None
+def _can_repair_execution_error(
+    tool: ToolSpec,
+    result: ToolResult,
+    model_name: str | None,
+) -> bool:
+    """Return whether a failed tool execution can be safely retried."""
+    if result.success or model_name == "fake-local":
+        return False
+    if not _looks_argument_repairable(result.error):
+        return False
+    if tool.requires_approval or tool.risk_level != "low":
+        return False
+    capability = tool.capability
+    return capability is not None and capability.read_only
 
 
-def _resolve_string(
-    value: str,
-    prior_results: tuple[ToolResult, ...],
-) -> tuple[object, str | None]:
-    if not value.startswith("$last."):
-        return value, None
-    field_name = value.removeprefix("$last.")
-    last_result = _last_successful_result(prior_results)
-    if last_result is None:
-        return None, f"Could not resolve {value}: no prior successful tool result."
-    if field_name not in last_result.output:
-        return (
-            None,
-            f"Could not resolve {value}: previous result has no '{field_name}' field.",
-        )
-    return last_result.output[field_name], None
+def _looks_argument_repairable(error: str | None) -> bool:
+    """Return whether an execution error is likely fixable by new arguments."""
+    if not error:
+        return False
+    normalized = error.lower()
+    non_repairable_markers = (
+        "auth",
+        "oauth",
+        "token",
+        "client_secret",
+        "permission",
+        "forbidden",
+        "unauthorized",
+        "approval",
+        "timeout",
+        "timed out",
+        "did not respond",
+    )
+    return not any(marker in normalized for marker in non_repairable_markers)
 
 
-def _last_successful_result(
-    prior_results: tuple[ToolResult, ...],
-) -> ToolResult | None:
-    for result in reversed(prior_results):
-        if result.success:
-            return result
-    return None
+def _tool_use_attempts_data(attempts) -> list[dict[str, object]]:
+    """Return trace-safe data for ToolUseAgent attempts."""
+    return [
+        {
+            "attempt": attempt.attempt,
+            "arguments": attempt.arguments,
+            "error": attempt.error,
+            "raw_output": attempt.raw_output,
+        }
+        for attempt in attempts
+    ]

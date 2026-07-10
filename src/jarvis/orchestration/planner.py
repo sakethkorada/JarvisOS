@@ -1,8 +1,9 @@
-"""LLM-assisted planning with deterministic validation and fallback."""
+"""LLM-assisted planning with deterministic validation and generic fallback."""
 
 from __future__ import annotations
 
 import json
+from dataclasses import asdict
 from typing import Any
 
 from jarvis.agents import AgentRegistry
@@ -10,12 +11,16 @@ from jarvis.contracts import (
     AvailableTool,
     ExecutionPlan,
     ModelRequest,
+    ModelResponse,
     PlanStep,
+    ToolSpec,
     ToolCall,
     new_id,
 )
 from jarvis.errors import ModelProviderError
 from jarvis.models import ModelRouter
+from jarvis.orchestration.agent_runtime import AgentRuntime
+from jarvis.orchestration.arguments import resolve_tool_arguments
 from jarvis.tools.registry import ToolRegistry
 
 
@@ -33,6 +38,7 @@ class Planner:
         self._tools = tools
         self._models = models
         self._system_prompt = system_prompt
+        self._agent_runtime = AgentRuntime(agents.get("planner"), models)
 
     def create_plan(
         self,
@@ -41,7 +47,8 @@ class Planner:
         model_mode: str,
     ) -> tuple[ExecutionPlan, str, str | None]:
         """Create a validated plan and return the source plus raw model output."""
-        if model_name == "fake-local":
+        selected_model = self._agent_runtime.resolve_model_name(model_name, model_mode)
+        if selected_model == "fake-local":
             return self.create_fallback_plan(goal), "fallback", None
 
         available_tools = self._tools.available_tools()
@@ -52,151 +59,39 @@ class Planner:
             messages=[_planner_context(available_tools)],
         )
         try:
-            model_response = self._models.run(request, model_name)
+            model_response = self._agent_runtime.run(request, model_name).response
         except ModelProviderError as exc:
             return self.create_fallback_plan(goal), "fallback", str(exc)
-        parsed_steps = _parse_model_steps(model_response.text)
-        if parsed_steps is None:
-            return self.create_fallback_plan(goal), "fallback", model_response.text
+        plan, error = self._plan_from_model_output(goal, model_response.text)
+        if plan is not None:
+            return plan, "llm", model_response.text
 
-        plan = self._plan_from_steps(goal, parsed_steps)
-        if plan is None:
-            return self.create_fallback_plan(goal), "fallback", model_response.text
-        return plan, "llm", model_response.text
+        repair_response = self._repair_plan(
+            goal,
+            model_name,
+            model_mode,
+            available_tools,
+            model_response.text,
+            error or "Planner output was invalid.",
+        )
+        if repair_response is not None:
+            repaired_plan, _ = self._plan_from_model_output(goal, repair_response.text)
+            if repaired_plan is not None:
+                return repaired_plan, "llm_repaired", repair_response.text
+        return self.create_fallback_plan(goal), "fallback", model_response.text
 
     def create_fallback_plan(self, goal: str) -> ExecutionPlan:
-        """Create a deterministic plan from simple available-tool heuristics."""
-        normalized = goal.lower()
-        steps: list[PlanStep] = [
-            PlanStep(
-                id=new_id("step"),
-                agent_name="memory",
-                tool_call=ToolCall("memory.search", {"query": goal}),
-                description="Search memory for relevant context.",
-            )
-        ]
-
-        if "calendar" in normalized and "list" in normalized:
-            list_calendars_tool = _first_matching_tool(
-                self._tools,
-                suffix=".list_calendars",
-            )
-            if list_calendars_tool is not None:
-                steps.append(
-                    PlanStep(
-                        id=new_id("step"),
-                        agent_name=_agent_for_tool(list_calendars_tool),
-                        tool_call=ToolCall(list_calendars_tool, {}),
-                        description="List configured calendars.",
-                    )
-                )
-            elif self._tools.has("calendar.search_events"):
-                steps.append(
-                    PlanStep(
-                        id=new_id("step"),
-                        agent_name="calendar",
-                        tool_call=ToolCall("calendar.search_events", {"query": goal}),
-                        description="Check calendar context.",
-                    )
-                )
-        elif any(word in normalized for word in ("meeting", "calendar", "schedule")):
-            calendar_tool = _first_matching_tool(self._tools, suffix=".list_events")
-            if calendar_tool is None:
-                calendar_tool = (
-                    "calendar.search_events"
-                    if self._tools.has("calendar.search_events")
-                    else None
-                )
-            if calendar_tool is not None:
-                arguments = (
-                    {"query": goal}
-                    if calendar_tool == "calendar.search_events"
-                    else {"calendarId": "primary"}
-                )
-                description = (
-                    "Check calendar context."
-                    if calendar_tool == "calendar.search_events"
-                    else "List calendar events from the primary calendar."
-                )
-                steps.append(
-                    PlanStep(
-                        id=new_id("step"),
-                        agent_name=_agent_for_tool(calendar_tool),
-                        tool_call=ToolCall(calendar_tool, arguments),
-                        description=description,
-                    )
-                )
-
-        should_search_notes = any(
-            word in normalized
-            for word in ("note", "notes", "jordan", "project", "meeting")
-        )
-        if should_search_notes and self._tools.has("notes.search"):
+        """Create a minimal safe fallback without provider keyword routing."""
+        steps: list[PlanStep] = []
+        if self._tools.has("memory.search"):
             steps.append(
                 PlanStep(
                     id=new_id("step"),
-                    agent_name="plugin",
-                    tool_call=ToolCall("notes.search", {"query": goal}),
-                    description="Search configured notes plugin.",
+                    agent_name="memory",
+                    tool_call=ToolCall("memory.search", {"query": goal}),
+                    description="Search memory for relevant context.",
                 )
             )
-
-        should_create_task = any(
-            phrase in normalized
-            for phrase in (
-                "create a task",
-                "add a task",
-                "todo",
-                "to-do",
-                "track a task",
-            )
-        )
-        if should_create_task and self._tools.has("task.create"):
-            steps.append(
-                PlanStep(
-                    id=new_id("step"),
-                    agent_name="orchestrator",
-                    tool_call=ToolCall("task.create", {"title": goal}),
-                    description="Create a local task.",
-                )
-            )
-
-        should_generate_text = any(
-            phrase in normalized
-            for phrase in (
-                "generate",
-                "draft",
-                "compose",
-                "rewrite",
-                "write",
-                "fun fact",
-            )
-        )
-        if should_generate_text and self._tools.has("general.generate_text"):
-            steps.append(
-                PlanStep(
-                    id=new_id("step"),
-                    agent_name="general",
-                    tool_call=ToolCall(
-                        "general.generate_text",
-                        {"instruction": goal},
-                    ),
-                    description="Generate requested text.",
-                )
-            )
-
-        if "echo" in normalized:
-            echo_tool = _first_matching_tool(self._tools, suffix=".echo")
-            if echo_tool is not None:
-                echo_text = "$last.text" if should_generate_text else goal
-                steps.append(
-                    PlanStep(
-                        id=new_id("step"),
-                        agent_name="plugin",
-                        tool_call=ToolCall(echo_tool, {"text": echo_text}),
-                        description="Call configured echo tool.",
-                    )
-                )
 
         if self._tools.has("task.create_summary"):
             steps.append(
@@ -209,31 +104,79 @@ class Planner:
             )
         return ExecutionPlan(goal=goal, steps=tuple(steps))
 
+    def _repair_plan(
+        self,
+        goal: str,
+        model_name: str | None,
+        model_mode: str,
+        available_tools: tuple[AvailableTool, ...],
+        invalid_output: str,
+        error: str,
+    ) -> ModelResponse | None:
+        """Ask the model for one corrected plan after validation fails."""
+        request = ModelRequest(
+            goal=goal,
+            mode=model_mode,
+            system_prompt=self._system_prompt,
+            messages=[
+                _planner_context(available_tools),
+                _planner_repair_context(invalid_output, error),
+            ],
+        )
+        try:
+            return self._agent_runtime.run(request, model_name).response
+        except ModelProviderError:
+            return None
+
+    def _plan_from_model_output(
+        self,
+        goal: str,
+        text: str,
+    ) -> tuple[ExecutionPlan | None, str | None]:
+        """Parse and validate model planner output."""
+        parsed_steps, error = _parse_model_steps(text)
+        if parsed_steps is None:
+            return None, error
+        return self._plan_from_steps(goal, parsed_steps)
+
     def _plan_from_steps(
         self,
         goal: str,
         steps: list[dict[str, Any]],
-    ) -> ExecutionPlan | None:
+    ) -> tuple[ExecutionPlan | None, str | None]:
         plan_steps: list[PlanStep] = []
         for step in steps:
             tool_name = step.get("tool_name")
             arguments = step.get("arguments", {})
             description = step.get("description")
             if not isinstance(tool_name, str) or not self._tools.has(tool_name):
-                return None
+                return None, f"Unknown or invalid tool_name: {tool_name!r}."
             if not isinstance(arguments, dict):
-                return None
+                return None, f"Arguments for {tool_name} must be a JSON object."
             if not isinstance(description, str) or not description.strip():
-                return None
-            arguments = _normalize_arguments(tool_name, arguments, goal)
-            try:
-                arguments = self._tools.normalize_arguments(tool_name, arguments)
-            except ValueError:
-                return None
+                return None, f"Description for {tool_name} must be a string."
+            reference_error = _unsupported_reference_error(arguments)
+            if reference_error is not None:
+                return None, reference_error
+            tool_spec = self._tools.get(tool_name)
+            resolution = resolve_tool_arguments(
+                goal,
+                tool_spec,
+                arguments,
+                resolve_references=False,
+            )
+            if resolution.error is not None:
+                return None, resolution.error
+            arguments = resolution.arguments
 
-            agent_name = _agent_for_tool(tool_name)
-            if not _agent_can_use_tool(self._agents, agent_name, tool_name):
-                return None
+            agent_name = _agent_for_tool(self._tools, tool_name)
+            if not _agent_can_use_tool(
+                self._agents,
+                agent_name,
+                tool_name,
+                tool_spec,
+            ):
+                return None, f"{agent_name} is not allowed to use {tool_name}."
             plan_steps.append(
                 PlanStep(
                     id=new_id("step"),
@@ -244,8 +187,8 @@ class Planner:
             )
 
         if not plan_steps:
-            return None
-        return ExecutionPlan(goal=goal, steps=tuple(plan_steps))
+            return None, "Planner returned no executable steps."
+        return ExecutionPlan(goal=goal, steps=tuple(plan_steps)), None
 
 
 def _planner_context(available_tools: tuple[AvailableTool, ...]) -> str:
@@ -253,25 +196,48 @@ def _planner_context(available_tools: tuple[AvailableTool, ...]) -> str:
         {
             "name": tool.name,
             "description": tool.description,
+            "argument_hints": tool.argument_hints,
             "risk_level": tool.risk_level,
             "requires_approval": tool.requires_approval,
             "source": tool.source,
             "input_schema": tool.input_schema,
+            "capability": (
+                asdict(tool.capability) if tool.capability is not None else None
+            ),
         }
         for tool in available_tools
     ]
-    return "Available tools:\n" + json.dumps(tools, indent=2)
+    return (
+        "Registered tool catalog. Choose from these tools only. Use the "
+        "description, capability metadata, risk, approval requirement, "
+        "input_schema, and argument_hints to decide which tools best satisfy "
+        "the goal.\n"
+        + json.dumps(tools, indent=2)
+    )
 
 
-def _parse_model_steps(text: str) -> list[dict[str, Any]] | None:
+def _planner_repair_context(invalid_output: str, error: str) -> str:
+    return (
+        "The previous planner output was invalid.\n"
+        f"Validation error: {error}\n"
+        "Previous output:\n"
+        f"{invalid_output}\n"
+        "Return corrected JSON using the required planner schema. Do not invent "
+        "tools. Do not explain the correction."
+    )
+
+
+def _parse_model_steps(text: str) -> tuple[list[dict[str, Any]] | None, str | None]:
     try:
         payload = json.loads(_strip_code_fence(text))
     except json.JSONDecodeError:
-        return None
+        return None, "Planner response was not valid JSON."
     steps = payload.get("steps") if isinstance(payload, dict) else None
     if not isinstance(steps, list):
-        return None
-    return [step for step in steps if isinstance(step, dict)]
+        return None, "Planner response must be a JSON object with a steps list."
+    if not all(isinstance(step, dict) for step in steps):
+        return None, "Every planner step must be a JSON object."
+    return steps, None
 
 
 def _strip_code_fence(text: str) -> str:
@@ -286,13 +252,41 @@ def _strip_code_fence(text: str) -> str:
     return stripped
 
 
-def _agent_for_tool(tool_name: str) -> str:
+def _unsupported_reference_error(value: Any) -> str | None:
+    if isinstance(value, str):
+        if value.startswith("$") and not value.startswith("$last."):
+            return (
+                f"Unsupported planner reference {value!r}. "
+                "Use only $last.<field> references."
+            )
+        return None
+    if isinstance(value, list):
+        for item in value:
+            error = _unsupported_reference_error(item)
+            if error is not None:
+                return error
+    if isinstance(value, dict):
+        for item in value.values():
+            error = _unsupported_reference_error(item)
+            if error is not None:
+                return error
+    return None
+
+
+def _agent_for_tool(tools: ToolRegistry, tool_name: str) -> str:
+    capability = tools.get(tool_name).capability
+    if capability is not None and capability.domain == "calendar":
+        return "calendar"
+    if capability is not None and capability.domain == "email":
+        return "email"
+    if capability is not None and capability.domain == "music":
+        return "music"
     if tool_name.startswith("general."):
         return "general"
     if tool_name.startswith("memory."):
         return "memory"
-    if tool_name.startswith("calendar."):
-        return "calendar"
+    if tool_name.startswith("system."):
+        return "system"
     if tool_name.startswith("task."):
         return "orchestrator"
     return "plugin"
@@ -302,33 +296,19 @@ def _agent_can_use_tool(
     agents: AgentRegistry,
     agent_name: str,
     tool_name: str,
+    tool: ToolSpec | None = None,
 ) -> bool:
     agent = agents.get(agent_name)
+    if agent_name == "calendar" and tool is not None:
+        capability = tool.capability
+        if capability is not None and capability.domain == "calendar":
+            return True
+    if agent_name == "email" and tool is not None:
+        capability = tool.capability
+        if capability is not None and capability.domain == "email":
+            return True
+    if agent_name == "music" and tool is not None:
+        capability = tool.capability
+        if capability is not None and capability.domain == "music":
+            return True
     return "*" in agent.allowed_tools or tool_name in agent.allowed_tools
-
-
-def _normalize_arguments(
-    tool_name: str,
-    arguments: dict[str, Any],
-    goal: str,
-) -> dict[str, Any]:
-    """Fill safe defaults for known built-in tools."""
-    normalized = dict(arguments)
-    if tool_name in {"memory.search", "calendar.search_events", "notes.search"}:
-        normalized.setdefault("query", goal)
-    if tool_name in {"task.breakdown", "task.create", "task.create_summary"}:
-        normalized.setdefault("goal", goal)
-    if tool_name == "task.create":
-        normalized.setdefault("title", goal)
-    if tool_name == "general.generate_text":
-        normalized.setdefault("instruction", goal)
-    if tool_name.endswith(".echo"):
-        normalized.setdefault("text", goal)
-    return normalized
-
-
-def _first_matching_tool(tools: ToolRegistry, suffix: str) -> str | None:
-    for tool in tools.list():
-        if tool.name.endswith(suffix):
-            return tool.name
-    return None

@@ -1,0 +1,71 @@
+{
+  "name": "planner-tool-use-smoke",
+  "description": "Non-executing smoke checks for planner tool choice and ToolUseAgent argument filling.",
+  "cases": [
+    {
+      "id": "current-date-uses-system-tool",
+      "kind": "planner",
+      "goal": "What is the current date?",
+      "expected_tools": ["system.current_datetime"],
+      "forbidden_tools": ["task.breakdown"],
+      "max_steps": 2
+    },
+    {
+      "id": "calendar-list-uses-calendar-tool",
+      "kind": "planner",
+      "goal": "Use Google Calendar to list my calendars.",
+      "expected_tools": ["google_calendar.list_calendars"],
+      "forbidden_tools": ["task.breakdown"],
+      "max_steps": 3
+    },
+    {
+      "id": "gmail-recent-uses-gmail-tool",
+      "kind": "planner",
+      "goal": "Use Gmail to show some of my recent email.",
+      "expected_tools": ["gmail.list_recent"],
+      "forbidden_tools": ["task.breakdown"],
+      "max_steps": 3
+    },
+    {
+      "id": "spotify-search-uses-spotify-tool",
+      "kind": "planner",
+      "goal": "Search Spotify for Daft Punk tracks.",
+      "expected_tools": ["spotify.search"],
+      "forbidden_tools": ["task.breakdown"],
+      "max_steps": 3
+    },
+    {
+      "id": "calendar-list-events-argument-fill",
+      "kind": "tool_use",
+      "goal": "Use Google Calendar to summarize my coming events in the next week.",
+      "tool_name": "google_calendar.list_events",
+      "rough_arguments": {},
+      "expected_arguments": {
+        "calendar_id": "primary"
+      },
+      "required_argument_keys": ["calendar_id"],
+      "forbidden_argument_keys": ["query"]
+    },
+    {
+      "id": "gmail-search-argument-fill",
+      "kind": "tool_use",
+      "goal": "Use Gmail to find recent emails from Jordan.",
+      "tool_name": "gmail.search_messages",
+      "rough_arguments": {},
+      "required_argument_keys": ["query"],
+      "forbidden_argument_keys": ["message_id", "thread_id"]
+    },
+    {
+      "id": "spotify-search-argument-fill",
+      "kind": "tool_use",
+      "goal": "Search Spotify for Daft Punk tracks.",
+      "tool_name": "spotify.search",
+      "rough_arguments": {},
+      "expected_arguments": {
+        "types": "track"
+      },
+      "required_argument_keys": ["query"],
+      "forbidden_argument_keys": ["message_id", "calendar_id"]
+    }
+  ]
+}

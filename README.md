@@ -57,6 +57,13 @@ $env:PYTHONPATH="src"
 Use `--config` to point at a TOML settings file. If omitted, JarvisOS looks for
 `jarvis.toml` and then `config/jarvis.toml`.
 
+Run configs choose enabled models, capability packs, plugins, MCP servers,
+prompts, policies, and state paths. Provider auth is shared: if a run config
+does not define `[auth]`, JarvisOS looks for a global auth profile from
+`JARVIS_AUTH_PROFILE`, `.jarvis/auth.toml`, `config/auth.toml`, `jarvis.toml`,
+then `config/jarvis.toml`. This lets a capability pack or tool config enable
+Calendar/Gmail tools without duplicating Google OAuth metadata.
+
 ### Run
 
 ```powershell
@@ -75,7 +82,8 @@ Options:
 - `--json` prints the full structured run result, including plan, tool results,
   trace events, and status.
 - `--model` manually selects a model provider for this run.
-- `--mode` resolves a model from `[models.modes]` in settings.
+- `--mode` resolves a model from `[models.roles]`, then `[models.modes]`, then
+  the default model when `--model` is omitted.
 - `--config` loads a specific settings file.
 
 When a real model such as Ollama is selected, JarvisOS asks the model for a JSON
@@ -83,9 +91,23 @@ tool plan, validates it against registered tools and agent permissions, then
 executes the validated plan. If the model returns invalid JSON or unknown tools,
 JarvisOS falls back to a deterministic safe plan.
 
-After tool execution, the synthesis agent asks the selected model to write the
-final response from confirmed tool results. If model synthesis fails or makes an
-obvious unsupported claim, JarvisOS falls back to deterministic grounded output.
+Before execution, tool arguments pass through the model-backed ToolUseAgent. It
+receives the user goal, current time, prior successful results, the selected
+tool, the selected tool's input schema, and optional selected-tool
+`argument_hints`. It returns JSON arguments, deterministic validation checks
+them, and the agent can retry when validation fails. For explicit read-only,
+low-risk tools, the orchestrator can also feed one argument-like execution
+error back to ToolUseAgent for repair. Auth, token, permission, and timeout
+failures are not retried as argument repairs. Deterministic code still resolves
+`$last.text`, strips unsupported schema keys, applies policy, and fails cleanly
+when valid arguments cannot be produced.
+
+After tool execution, the synthesis agent asks the selected model to write an
+answer-first final response from confirmed tool results. Normal `jarvis run`
+output avoids runtime headings and successful-tool logs; detailed plan, tool,
+and trace data stays available through `--json` and trace commands. If model
+synthesis fails, returns runtime-shaped output, or makes an obvious unsupported
+claim, JarvisOS falls back to a concise deterministic grounded answer.
 
 `general.generate_text` is the first internal language capability. The planner
 can use it to generate intermediate text, then pass that text into a following
@@ -93,14 +115,16 @@ tool with `$last.text`. This keeps drafting and language generation in the
 model layer while provider tools such as MCP servers perform their concrete
 actions.
 
-Planner and synthesis prompts are loaded from bundled prompt files by default.
-Users can override them from config without editing Python code.
+Planner, ToolUseAgent, and synthesis prompts are loaded from bundled prompt
+files by default. Users can override them from config without editing Python
+code.
 
 Model selection precedence:
 
 ```text
 --model
-> --mode from settings
+> [models.roles], such as planner or tool_use
+> [models.modes], such as private
 > [models].default from settings
 > fake-local fallback
 ```
@@ -111,10 +135,16 @@ Model selection precedence:
 python -m jarvis agents
 python -m jarvis tools
 python -m jarvis tools --config jarvis.toml.example
+python -m jarvis tool call task.breakdown --args-json '{\"goal\":\"demo\"}' --config jarvis.toml.example
 python -m jarvis models
 python -m jarvis settings
 python -m jarvis settings --config jarvis.toml.example
 ```
+
+Use `jarvis tool call` to debug a registered tool directly, without planner or
+synthesis noise. The command accepts only a JSON object in `--args-json`,
+evaluates policy before execution, and prints the tool's `text` output when one
+is available. Add `--json` to see the full `ToolResult`.
 
 ### Approvals
 
@@ -159,8 +189,15 @@ python -m jarvis approvals list --config jarvis.toml.example
 python -m jarvis traces list --config jarvis.toml.example
 ```
 
-Use `--model fake-local` for deterministic smoke checks. Use Ollama for the
-LLM planner and synthesis path.
+Use Ollama or another real model for the normal POC path. `--model fake-local`
+is still available as a deterministic debug/test tool, but it should not be
+treated as the standard runtime behavior.
+
+The default runtime no longer ships a fake calendar reader. Calendar behavior
+comes from configured MCP/plugin tools such as the local Google Calendar
+FastMCP wrapper. Without a configured calendar tool, meeting/calendar requests
+degrade to memory, notes, tasks, and summary steps instead of returning demo
+events.
 
 To prove model-generated text flowing into a tool, copy
 `examples/mcp/demo.toml.example` to a local config such as `mcp-demo.toml`,
@@ -193,6 +230,30 @@ and understanding exactly what happened during a run.
 Trace events include planning, policy checks, tool execution, synthesis source,
 resolved tool arguments, and structured model-provider errors when fallbacks
 are used.
+
+### Planner And Tool-Use Evals
+
+Eval suites let you compare planner and ToolUseAgent quality without executing
+provider tools. A suite is a JSON file with `planner` cases for tool choice and
+`tool_use` cases for schema-grounded argument construction.
+
+```powershell
+python -m jarvis evals run examples/evals/planner-tool-use.json --model "ollama/llama3.2:3b"
+python -m jarvis evals run examples/evals/planner-tool-use.json --model "ollama/llama3.2:3b" --json
+python -m jarvis evals run examples/evals/planner-coverage.json --config jarvis.toml --model "gemini/gemini-3.5-flash" --include-raw --json
+python -m jarvis evals run examples/evals/planner-tool-use.json --model "ollama/llama3.2:3b" --json --include-raw
+```
+
+Planner cases score expected tools, forbidden tools, fallback use, and maximum
+step count. Tool-use cases score required argument keys, forbidden argument
+keys, and expected argument values. The harness does not call Gmail, Calendar,
+Spotify, or other provider tools; it only evaluates model choices and generated
+arguments against registered tool metadata. If the active config does not
+enable a tool named by the suite, that case fails with an unknown-tool error.
+
+Live provider evals can encounter quota or rate-limit responses. Treat those as
+infrastructure results, not a measure of planner quality; use the JSON report
+and raw output to distinguish them from an actual scoring failure.
 
 ### Memory
 
@@ -261,20 +322,113 @@ Model resolution is provider-agnostic:
 
 ```text
 CLI --model
+> settings role route, such as planner or tool_use
 > settings mode, such as --mode private
 > settings default model
 > fake-local fallback
 ```
 
-`jarvis.toml` can point at local providers now and cloud providers later without
-changing orchestrator code.
+`jarvis.toml` can point at local and cloud providers without changing
+orchestrator code.
+
+Agent profiles declare an `execution_role`; they do not name providers directly.
+The generic `AgentRuntime` wrapper resolves that role through the model router
+and then calls the selected local or API provider. This keeps planner,
+ToolUseAgent, synthesis, and future user-defined specialists on the same
+substrate.
+
+```toml
+[models.roles]
+planner = "ollama/llama3.2:3b"
+tool_use = "ollama/llama3.2:3b"
+synthesis = "ollama/llama3.2:3b"
+general = "ollama/llama3.2:3b"
+```
+
+### Model API Auth vs Tool OAuth
+
+JarvisOS has two separate auth paths:
+
+- Model providers authenticate the model call itself. Local Ollama needs no API
+  key. Gemini reads its API key from an environment variable through provider
+  adapter settings; Anthropic, OpenAI, and Grok should follow the same pattern.
+- Tool integrations authenticate access to user data or external accounts.
+  Google Calendar, Gmail, and Spotify use OAuth provider metadata, local token
+  storage, refresh tokens, and `jarvis auth connect`.
+
+That split is intentional. Routing the planner to Gemini should not change
+Google Calendar OAuth, and connecting Google Calendar should not decide which
+model the planner uses. The role substrate keeps this separation intact.
+
+Install the optional Gemini adapter and route only planning to it:
+
+```powershell
+uv pip install -e ".[gemini]"
+$env:GEMINI_API_KEY = "your-key"
+```
+
+```toml
+[models.roles]
+planner = "gemini/gemini-3.5-flash"
+tool_use = "ollama/llama3.2:3b"
+synthesis = "ollama/llama3.2:3b"
+
+[providers.gemini]
+models = ["gemini-3.5-flash"]
+api_key_env = "GEMINI_API_KEY"
+timeout_seconds = 60
+```
+
+The Gemini adapter uses the Interactions API through `google-genai`, passes the
+API key explicitly from `api_key_env`, and uses `store = false` so JarvisOS
+remains the source of trace and memory history. A Gemini model is registered
+only when it is listed in `[providers.gemini]` or referenced by `[models]`,
+`[models.modes]`, or `[models.roles]`; merely setting an API key does not change
+routing. Check the configured result with:
+
+```powershell
+python -m jarvis models --config jarvis.toml
+python -m jarvis run "Summarize how JarvisOS works" --config jarvis.toml
+```
+
+## Capability Packs
+
+Capability packs are built-in config fragments that expand into ordinary tools
+or MCP servers. They are opt-in from `jarvis.toml`, and explicit
+`[[mcp.servers]]` entries with the same name override the bundled default.
+
+Enable the current Google Workspace and Spotify read-only packs after OAuth and
+the optional MCP dependencies are configured:
+
+```toml
+[capabilities]
+google_workspace = true
+spotify = true
+```
+
+Then common commands can omit `--config`:
+
+```powershell
+python -m jarvis tools
+python -m jarvis tool call google_calendar.list_calendars --args-json '{}' --json
+python -m jarvis tool call gmail.list_recent --args-json '{"max_results":5}' --json
+python -m jarvis tool call spotify.search --args-json '{"query":"Daft Punk","types":"track,artist","limit":5}' --json
+python -m jarvis run "Use Calendar and Gmail to prep me for meetings this week" --model "ollama/llama3.2:3b"
+```
+
+The initial `google_workspace` pack enables the local FastMCP Calendar and Gmail
+read wrappers. The `spotify` pack enables read-only Spotify search, current
+playback, recently played, and playlist tools. Private OAuth metadata, client
+secrets, and tokens still live in the global auth profile and environment
+variables, not in tracked defaults.
 
 ## Prompt Settings
 
-JarvisOS ships bundled prompt files for planning and final synthesis:
+JarvisOS ships bundled prompt files for planning, tool use, and final synthesis:
 
 ```text
 src/jarvis/prompts/planner.md
+src/jarvis/prompts/tool_use.md
 src/jarvis/prompts/synthesis.md
 ```
 
@@ -283,6 +437,7 @@ To customize them, point `[prompts]` at your own files:
 ```toml
 [prompts]
 planner = "prompts/planner.md"
+tool_use = "prompts/tool_use.md"
 synthesis = "prompts/synthesis.md"
 ```
 
@@ -347,14 +502,18 @@ HTTP MCP servers use `transport = "http"` and `url`:
 
 ```toml
 [[mcp.servers]]
-name = "google_calendar"
+name = "remote_example"
 transport = "http"
-url = "https://calendarmcp.googleapis.com/mcp/v1"
-auth_provider = "google"
-bearer_token_env = "GOOGLE_MCP_ACCESS_TOKEN"
-risk_level = "medium"
-requires_approval = true
+url = "https://mcp.example.com/mcp"
+risk_level = "low"
+requires_approval = false
 ```
+
+The hosted Google Calendar MCP endpoint is not a recommended JarvisOS path: it
+returned permission failures even when direct Google Calendar REST access was
+authorized. Use the built-in `google_workspace` capability pack instead, which
+starts the local FastMCP Calendar and Gmail wrappers over the shared Google
+OAuth profile.
 
 When an HTTP MCP server has `auth_provider`, JarvisOS can start an OAuth
 authorization-code + PKCE flow on first use. It prints and opens the provider
@@ -371,14 +530,16 @@ python -m jarvis auth set-token google "<access-token>" --config google-calendar
 python -m jarvis auth list --config google-calendar.toml
 python -m jarvis auth debug google --config google-calendar.toml
 python -m jarvis auth clear google --config google-calendar.toml
+python -m jarvis auth connect spotify
 ```
 
 The current auth layer stores provider tokens and supplies bearer headers to
-HTTP MCP. The OAuth flow is triggered by first use of a configured authenticated
-HTTP MCP server; no separate `jarvis auth login` command is required.
-`auth debug` prints redacted provider metadata, token expiry, configured
-scopes, granted scopes when the provider exposes token-info, and client-id
-matching details without printing access or refresh tokens.
+HTTP MCP. The OAuth flow can be triggered by first use of a configured
+authenticated HTTP MCP server, or explicitly with `jarvis auth connect
+<provider>` for local stdio wrappers such as Google/Spotify FastMCP examples.
+`auth debug` prints the auth profile path, redacted provider metadata, token
+expiry, configured scopes, granted scopes when the provider exposes token-info,
+and client-id matching details without printing access or refresh tokens.
 
 Per-tool policy overrides can make read-only tools auto-allowed while writes
 remain approval-gated:
@@ -386,6 +547,7 @@ remain approval-gated:
 ```toml
 [[mcp.servers.tools]]
 name = "list_events"
+argument_hints = "Use calendar_id = \"primary\" unless the user named a specific calendar."
 risk_level = "low"
 requires_approval = false
 
@@ -394,6 +556,10 @@ name = "create_event"
 risk_level = "medium"
 requires_approval = true
 ```
+
+`argument_hints` are short, selected-tool-only instructions for ToolUseAgent.
+They are useful for provider query syntax, conservative defaults, and examples
+that should not bloat the global tool-use prompt.
 
 Read-only MCP servers should usually be low risk and auto-allowed. Write,
 send, post, playback, purchase, booking, or externally visible MCP tools should
@@ -427,6 +593,88 @@ python -m jarvis tools --config google-calendar-fastmcp.toml
 python -m jarvis run "Use Google Calendar to list my calendars" --config google-calendar-fastmcp.toml
 ```
 
+The Calendar config only enables the local MCP server. Google OAuth metadata and
+the token database are resolved from the global auth profile, so the MCP config
+does not need to point back at `jarvis.toml`. You can confirm the same path with:
+
+```powershell
+python -m jarvis auth debug google --config google-calendar-fastmcp.toml --json
+python -m jarvis tool call google_calendar.list_calendars --args-json '{}' --config google-calendar-fastmcp.toml --json
+```
+
+The local Gmail FastMCP example wraps Gmail REST reads while registering tools
+as `gmail.*`:
+
+```powershell
+Copy-Item examples/mcp/google-gmail-fastmcp.toml.example google-gmail-fastmcp.toml
+python -m jarvis tools --config google-gmail-fastmcp.toml
+python -m jarvis tool call gmail.list_recent --args-json '{"max_results":5}' --config google-gmail-fastmcp.toml --json
+python -m jarvis run "Use Gmail to find recent emails from Jordan" --config google-gmail-fastmcp.toml --model "ollama/llama3.2:3b"
+```
+
+Available read-only Gmail tools are:
+
+- `gmail.list_recent`
+- `gmail.search_messages`
+- `gmail.get_message`
+- `gmail.get_thread`
+
+For combined Calendar + Gmail prompts, use the Workspace example:
+
+```powershell
+Copy-Item examples/mcp/google-workspace-fastmcp.toml.example google-workspace-fastmcp.toml
+python -m jarvis tools --config google-workspace-fastmcp.toml
+python -m jarvis run "Use Calendar and Gmail to prep me for meetings this week" --config google-workspace-fastmcp.toml --model "ollama/llama3.2:3b"
+```
+
+For daily local use, prefer enabling `[capabilities].google_workspace = true` in
+`jarvis.toml`. The standalone Calendar/Gmail/Workspace configs are still useful
+for isolated debugging or for overriding the bundled defaults.
+
+The local Spotify FastMCP example wraps Spotify Web API reads while registering
+tools as `spotify.*`:
+
+```powershell
+Copy-Item examples/mcp/spotify-fastmcp.toml.example spotify-fastmcp.toml
+python -m jarvis tools --config spotify-fastmcp.toml
+python -m jarvis tool call spotify.search --args-json '{"query":"Daft Punk","types":"track,artist","limit":5}' --config spotify-fastmcp.toml --json
+python -m jarvis run "Search Spotify for Daft Punk tracks" --config spotify-fastmcp.toml --model "ollama/llama3.2:3b"
+```
+
+Available read-only Spotify tools are:
+
+- `spotify.search`
+- `spotify.current_playback`
+- `spotify.recently_played`
+- `spotify.list_playlists`
+
+For daily local use, enable `[capabilities].spotify = true` in `jarvis.toml`
+after Spotify OAuth is configured.
+
+Minimal Spotify auth profile:
+
+```toml
+[[auth.oauth_providers]]
+name = "spotify"
+client_id = "replace-with-spotify-client-id"
+authorization_url = "https://accounts.spotify.com/authorize"
+token_url = "https://accounts.spotify.com/api/token"
+redirect_uri = "http://127.0.0.1:8765/oauth/callback"
+scopes = [
+  "user-read-playback-state",
+  "user-read-currently-playing",
+  "user-read-recently-played",
+  "playlist-read-private",
+]
+```
+
+Then connect once:
+
+```powershell
+python -m jarvis auth connect spotify
+python -m jarvis auth debug spotify --json
+```
+
 Try the demo server:
 
 ```powershell
@@ -449,6 +697,8 @@ JarvisOS has a small SQLite-backed memory store. Manual memory commands are real
 automatic extraction is currently suggest-only and does not silently write
 memories.
 Approved memory writes skip obvious normalized duplicates.
+Set `enabled = false` to remove memory from normal runtime runs while keeping
+the SQLite data and manual `jarvis memory` commands available.
 
 ```powershell
 $env:PYTHONPATH="src"
@@ -463,6 +713,7 @@ Configure the database path in `jarvis.toml`:
 ```toml
 [memory]
 database_path = ".jarvis/memory.sqlite3"
+enabled = true
 auto_extract = true
 auto_write = false
 

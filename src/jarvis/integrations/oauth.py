@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from threading import Event, Thread
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlencode, urlparse
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from jarvis.settings import OAuthProviderSettings
@@ -67,7 +68,7 @@ class OAuthManager:
         ):
             return record.access_token
         if record is not None and record.refresh_token and not force_authorize:
-            refreshed = self.refresh(provider, record)
+            refreshed = self.refresh(provider, record, suppress_errors=True)
             if refreshed is not None:
                 return refreshed.access_token
         authorized = self.authorize(provider)
@@ -77,6 +78,7 @@ class OAuthManager:
         self,
         provider: OAuthProviderSettings,
         record: OAuthTokenRecord,
+        suppress_errors: bool = False,
     ) -> OAuthTokenRecord | None:
         """Refresh an expired access token when a refresh token exists."""
         if provider.token_url is None or record.refresh_token is None:
@@ -89,6 +91,8 @@ class OAuthManager:
         try:
             response = _post_form(provider.token_url, payload)
         except RuntimeError:
+            if not suppress_errors:
+                raise
             return None
         return self._store_token_response(provider.name, response, record.refresh_token)
 
@@ -317,12 +321,40 @@ def _post_form(url: str, payload: dict[str, str]) -> dict[str, Any]:
         },
         method="POST",
     )
-    with urlopen(request, timeout=30) as response:
-        decoded = response.read().decode("utf-8")
+    try:
+        with urlopen(request, timeout=30) as response:
+            decoded = response.read().decode("utf-8")
+    except HTTPError as exc:
+        detail = _oauth_http_error_detail(exc)
+        raise RuntimeError(detail) from exc
+    except URLError as exc:
+        raise RuntimeError(f"OAuth token request failed: {exc.reason}") from exc
     data = json.loads(decoded)
     if not isinstance(data, dict):
         raise RuntimeError("OAuth token response must be a JSON object.")
     return data
+
+
+def _oauth_http_error_detail(error: HTTPError) -> str:
+    """Return a redacted provider token-endpoint error."""
+    body = error.read().decode("utf-8", errors="replace").strip()
+    if body:
+        try:
+            payload = json.loads(body)
+        except json.JSONDecodeError:
+            payload = {}
+        if isinstance(payload, dict):
+            code = str(payload.get("error", "")).strip()
+            description = str(payload.get("error_description", "")).strip()
+            if code and description:
+                return (
+                    f"OAuth token request failed with {error.code}: "
+                    f"{code}: {description}"
+                )
+            if code:
+                return f"OAuth token request failed with {error.code}: {code}"
+        return f"OAuth token request failed with {error.code}: {body[:500]}"
+    return f"OAuth token request failed with {error.code}."
 
 
 def _code_verifier() -> str:

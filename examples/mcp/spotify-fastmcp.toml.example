@@ -1,0 +1,45 @@
+# Local FastMCP Spotify config for JarvisOS.
+# Enables read-only Spotify tools through a local stdio MCP wrapper.
+# Requires FastMCP in the active environment:
+# uv pip install fastmcp
+#
+# OAuth provider metadata and token storage come from the global auth profile.
+
+[[mcp.servers]]
+name = "spotify"
+command = "python"
+args = [
+  "examples/mcp/spotify_fastmcp_server.py",
+  "--provider",
+  "spotify",
+]
+risk_level = "low"
+requires_approval = false
+
+[[mcp.servers.tools]]
+name = "search"
+argument_hints = """
+Use a concise Spotify catalog query.
+Set types to a comma-separated subset of track,artist,album,playlist based on the user request.
+Use limit between 5 and 10 unless the user asks otherwise.
+"""
+risk_level = "low"
+requires_approval = false
+
+[[mcp.servers.tools]]
+name = "current_playback"
+argument_hints = "No arguments are needed."
+risk_level = "low"
+requires_approval = false
+
+[[mcp.servers.tools]]
+name = "recently_played"
+argument_hints = "Use limit between 5 and 10 unless the user asks for a different count."
+risk_level = "low"
+requires_approval = false
+
+[[mcp.servers.tools]]
+name = "list_playlists"
+argument_hints = "Use limit between 5 and 10 unless specified. Use offset only when paging through more playlists."
+risk_level = "low"
+requires_approval = false

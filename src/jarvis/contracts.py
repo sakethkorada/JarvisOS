@@ -46,12 +46,28 @@ class ModelResponse:
 
 @dataclass(frozen=True)
 class AgentSpec:
-    """Configuration contract for a scoped specialist agent."""
+    """Configuration contract for a scoped agent profile."""
 
     name: str
     description: str
     allowed_tools: tuple[str, ...]
     default_model_mode: str = "balanced"
+    execution_role: str = "general"
+    prompt_ref: str | None = None
+    output_contract: str | None = None
+    memory_scope: str | None = None
+    risk_permissions: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class ToolCapability:
+    """Semantic metadata used for deterministic tool selection."""
+
+    domain: str
+    operation: str
+    provider: str | None = None
+    read_only: bool = True
+    demo: bool = False
 
 
 @dataclass(frozen=True)
@@ -60,10 +76,12 @@ class ToolSpec:
 
     name: str
     description: str
+    argument_hints: str | None = None
     risk_level: RiskLevel = "low"
     requires_approval: bool = False
     source: str = "builtin"
     input_schema: dict[str, Any] | None = None
+    capability: ToolCapability | None = None
 
 
 @dataclass(frozen=True)
@@ -72,10 +90,12 @@ class AvailableTool:
 
     name: str
     description: str
+    argument_hints: str | None
     risk_level: RiskLevel
     requires_approval: bool
     source: str
     input_schema: dict[str, Any] | None = None
+    capability: ToolCapability | None = None
 
 
 ToolHandler = Callable[[dict[str, Any]], dict[str, Any]]
