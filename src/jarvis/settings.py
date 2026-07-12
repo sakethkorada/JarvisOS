@@ -84,6 +84,7 @@ class McpServerSettings:
     auth_provider: str | None = None
     bearer_token_env: str | None = None
     enabled: bool = True
+    timeout_seconds: float = 10.0
     risk_level: str = "low"
     requires_approval: bool = False
     tools: tuple[McpToolSettings, ...] = ()
@@ -694,6 +695,10 @@ def _mcp_servers_from_data(data: dict[str, Any]) -> list[McpServerSettings]:
         auth_provider = _optional_string(item.get("auth_provider"))
         bearer_token_env = _optional_string(item.get("bearer_token_env"))
         enabled = _optional_bool(item.get("enabled"), default=True)
+        timeout_seconds = _optional_positive_number(
+            item.get("timeout_seconds"),
+            default=10.0,
+        )
         risk_level = _optional_string(item.get("risk_level")) or "low"
         requires_approval = _optional_bool(
             item.get("requires_approval"),
@@ -711,6 +716,7 @@ def _mcp_servers_from_data(data: dict[str, Any]) -> list[McpServerSettings]:
                 auth_provider=auth_provider,
                 bearer_token_env=bearer_token_env,
                 enabled=enabled,
+                timeout_seconds=timeout_seconds,
                 risk_level=risk_level,
                 requires_approval=requires_approval,
                 tools=tool_overrides,

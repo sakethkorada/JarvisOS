@@ -36,10 +36,12 @@ def _task_create_summary(arguments: dict[str, Any]) -> dict[str, Any]:
 def _system_current_datetime(arguments: dict[str, Any]) -> dict[str, Any]:
     """Return the current local date and time for time-aware answers."""
     now = datetime.now().astimezone()
+    iso_datetime = now.isoformat()
     return {
         "text": now.strftime("%A, %B %d, %Y %I:%M %p %Z"),
         "date": now.date().isoformat(),
-        "datetime": now.isoformat(),
+        "datetime": iso_datetime,
+        "iso": iso_datetime,
         "timezone": now.tzname(),
     }
 
@@ -200,6 +202,7 @@ def default_tool_registry(
             name="system.current_datetime",
             description=(
                 "Return the current local date, time, timezone, and ISO datetime. "
+                "The ISO value is available as both datetime and iso. "
                 "Use for questions about today's date, current time, or resolving "
                 "time-sensitive context."
             ),

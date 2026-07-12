@@ -57,6 +57,31 @@ class AgentSpec:
     output_contract: str | None = None
     memory_scope: str | None = None
     risk_permissions: tuple[str, ...] = ()
+    capability_domains: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Validate profile metadata at the contract boundary.
+
+        Agent metadata is consumed by planners and policy-aware runtimes, so
+        malformed profiles should fail when registered rather than producing
+        implicit, provider-specific behavior later in a run.
+        """
+        for field_name in ("name", "description", "default_model_mode", "execution_role"):
+            value = getattr(self, field_name)
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(f"AgentSpec.{field_name} must be a non-empty string")
+        for field_name in (
+            "allowed_tools",
+            "risk_permissions",
+            "capability_domains",
+        ):
+            values = getattr(self, field_name)
+            if any(not isinstance(value, str) or not value.strip() for value in values):
+                raise ValueError(f"AgentSpec.{field_name} entries must be non-empty strings")
+        for field_name in ("prompt_ref", "output_contract", "memory_scope"):
+            value = getattr(self, field_name)
+            if value is not None and (not isinstance(value, str) or not value.strip()):
+                raise ValueError(f"AgentSpec.{field_name} must be a non-empty string when set")
 
 
 @dataclass(frozen=True)
@@ -158,6 +183,8 @@ class PlanStep:
     tool_call: ToolCall
     description: str
     status: StepStatus = "pending"
+    depends_on: tuple[str, ...] = ()
+    output_key: str | None = None
 
 
 @dataclass(frozen=True)

@@ -18,6 +18,7 @@ from jarvis.contracts import ToolCapability, ToolSpec
 from jarvis.integrations.oauth import OAuthManager
 from jarvis.settings import McpServerSettings
 from jarvis.storage.auth import AuthStore
+from jarvis.tools.results import normalize_tool_output
 from jarvis.tools.registry import ToolRegistry
 
 
@@ -567,8 +568,13 @@ def _mcp_client(
 ) -> McpStdioClient | McpHttpClient:
     """Create the right MCP client for a configured server."""
     if server.transport == "http":
-        return McpHttpClient(server, auth_store, oauth_manager)
-    return McpStdioClient(server)
+        return McpHttpClient(
+            server,
+            auth_store,
+            oauth_manager,
+            timeout_seconds=server.timeout_seconds,
+        )
+    return McpStdioClient(server, timeout_seconds=server.timeout_seconds)
 
 
 def _resolved_command(command: str | None) -> str:
@@ -615,15 +621,39 @@ def _http_error_message(error: HTTPError) -> str:
 def _normalize_mcp_result(result: dict[str, Any]) -> dict[str, Any]:
     content = result.get("content", [])
     text = _content_to_text(content)
+    structured = result.get("structuredContent")
+    structured_output = structured if isinstance(structured, dict) else {}
+    embedded_text = _embedded_mcp_text(text)
+    if embedded_text is None:
+        candidate = structured_output.get("text")
+        embedded_text = candidate if isinstance(candidate, str) else None
+    if embedded_text is not None:
+        text = embedded_text
     if result.get("isError") is True:
         message = text or "MCP tool returned an error."
         raise RuntimeError(message)
     if text.startswith("AUTH_ERROR:"):
         raise RuntimeError(text.removeprefix("AUTH_ERROR:").strip())
-    return {
-        "mcp_result": result,
-        "text": text,
-    }
+    return normalize_tool_output(
+        {
+            "mcp_result": result,
+            "text": text,
+            **structured_output,
+        },
+        source="mcp",
+    )
+
+
+def _embedded_mcp_text(value: str) -> str | None:
+    """Extract wrapper text from JSON-encoded FastMCP content when present."""
+    try:
+        decoded = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(decoded, dict):
+        return None
+    text = decoded.get("text")
+    return text.strip() if isinstance(text, str) and text.strip() else None
 
 
 def _clean_mcp_arguments(arguments: dict[str, Any]) -> dict[str, Any]:

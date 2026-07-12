@@ -7,6 +7,7 @@ from dataclasses import replace
 from jarvis.agents import AgentRegistry
 from jarvis.contracts import (
     AgentSpec,
+    ExecutionPlan,
     MemoryCandidate,
     PlanStep,
     RunResult,
@@ -23,11 +24,14 @@ from jarvis.orchestration.arguments import (
     ToolUseAgent,
     ToolUseFeedback,
 )
+from jarvis.orchestration.graph import ExecutionGraph
 from jarvis.orchestration.planner import Planner
+from jarvis.orchestration.resume import ResumePreview, preview_resume
 from jarvis.orchestration.synthesizer import Synthesizer
 from jarvis.policies import PolicyEngine
 from jarvis.storage.approvals import ApprovalStore
 from jarvis.storage.memory import MemoryExtractor
+from jarvis.storage.journal import ReconstructedRun, RunJournal
 from jarvis.tools.registry import ToolRegistry
 
 
@@ -46,6 +50,7 @@ class Orchestrator:
         approval_store: ApprovalStore | None = None,
         memory_extractor: MemoryExtractor | None = None,
         auto_write_memory: bool = False,
+        journal: RunJournal | None = None,
     ) -> None:
         self._agents = agents
         self._tools = tools
@@ -54,6 +59,7 @@ class Orchestrator:
         self._approval_store = approval_store
         self._memory_extractor = memory_extractor
         self._auto_write_memory = auto_write_memory
+        self._journal = journal
         self._planner = Planner(agents, tools, models, planner_prompt)
         self._tool_use_agent = ToolUseAgent(models, tool_use_prompt)
         self._synthesizer = Synthesizer(models, synthesis_prompt)
@@ -63,49 +69,137 @@ class Orchestrator:
         goal: str,
         model_name: str | None = None,
         model_mode: str = "balanced",
+        _resume_state: ReconstructedRun | None = None,
     ) -> RunResult:
         """Run a goal through the current deterministic execution loop."""
-        run_id = new_id("run")
-        trace: list[TraceEvent] = [
-            TraceEvent("run.started", "Run started.", data={"goal": goal}),
-        ]
+        if _resume_state is None:
+            run_id = new_id("run")
+            trace: list[TraceEvent] = [
+                TraceEvent("run.started", "Run started.", data={"goal": goal}),
+            ]
+            plan, plan_source, raw_planner_output = self._planner.create_plan(
+                goal,
+                model_name,
+                model_mode,
+            )
+            planner_model = self._models.resolve_provider_name(
+                explicit_provider_name=model_name,
+                mode=model_mode,
+                role="planner",
+            )
+            trace.append(
+                TraceEvent(
+                    "planner.selected",
+                    f"Created plan with {plan_source} planner.",
+                    data={
+                        "model": planner_model,
+                        "model_override": model_name,
+                        "execution_role": "planner",
+                        "source": plan_source,
+                        "raw_planner_output": raw_planner_output,
+                    },
+                )
+            )
+            completed_steps: list[PlanStep] = []
+            results: list[ToolResult] = []
+            named_results: dict[str, ToolResult] = {}
+            status = "completed"
+        else:
+            run_id = _resume_state.run_id
+            goal = _resume_state.goal
+            plan = _resume_state.plan
+            trace = list(_resume_state.trace)
+            completed_steps = list(_resume_state.completed_steps)
+            results = list(_resume_state.results)
+            named_results = _named_results(completed_steps, results)
+            status = "completed" if _resume_state.status == "planned" else _resume_state.status
+            if _resume_state.in_flight_step is not None:
+                status = "failed"
+            trace.append(
+                TraceEvent(
+                    "run.resumed",
+                    "Run resumed from the latest durable checkpoint.",
+                    data={
+                        "run_id": run_id,
+                        "replay_protected_step_ids": [
+                            step.id for step in completed_steps
+                        ]
+                        + (
+                            [_resume_state.in_flight_step.id]
+                            if _resume_state.in_flight_step is not None
+                            else []
+                        ),
+                    },
+                )
+            )
 
-        plan, plan_source, raw_planner_output = self._planner.create_plan(
-            goal,
-            model_name,
-            model_mode,
-        )
-        planner_model = self._models.resolve_provider_name(
-            explicit_provider_name=model_name,
-            mode=model_mode,
-            role="planner",
-        )
+        graph = ExecutionGraph(plan)
         trace.append(
             TraceEvent(
-                "planner.selected",
-                f"Created plan with {plan_source} planner.",
+                "graph.validated",
+                f"Validated execution graph with {len(graph.steps)} node(s).",
                 data={
-                    "model": planner_model,
-                    "model_override": model_name,
-                    "execution_role": "planner",
-                    "source": plan_source,
-                    "raw_planner_output": raw_planner_output,
+                    "step_ids": [step.id for step in graph.steps],
+                    "topological_order": [step.id for step in graph.topological_order()],
                 },
             )
         )
-        trace.append(
-            TraceEvent(
-                "plan.created",
-                f"Created {len(plan.steps)} step(s).",
-                data={"steps": [step.description for step in plan.steps]},
+        if _resume_state is None:
+            self._checkpoint(run_id, goal, plan, (), (), "planned", trace)
+            trace.append(
+                TraceEvent(
+                    "plan.created",
+                    f"Created {len(plan.steps)} step(s).",
+                    data={"steps": [step.description for step in plan.steps]},
+                )
             )
-        )
 
-        completed_steps: list[PlanStep] = []
-        results: list[ToolResult] = []
-        status = "completed"
+        attempted_step_ids = {step.id for step in completed_steps}
+        if _resume_state is not None and _resume_state.in_flight_step is not None:
+            attempted_step_ids.add(_resume_state.in_flight_step.id)
+        successful_step_ids = {
+            step.id
+            for step, result in zip(completed_steps, results)
+            if result.success
+        }
 
-        for step in plan.steps:
+        for step in graph.topological_order():
+            if step.id in attempted_step_ids:
+                trace.append(
+                    TraceEvent(
+                        "resume.step_skipped",
+                        f"Skipped previously attempted step {step.id}.",
+                        data={"step_id": step.id, "reason": "replay_protected"},
+                    )
+                )
+                self._checkpoint(
+                    run_id,
+                    goal,
+                    plan,
+                    tuple(completed_steps),
+                    tuple(results),
+                    status,
+                    trace,
+                )
+                continue
+            if any(dependency not in successful_step_ids for dependency in step.depends_on):
+                trace.append(
+                    TraceEvent(
+                        "resume.step_blocked",
+                        f"Skipped {step.id} because a dependency did not succeed.",
+                        data={"step_id": step.id, "depends_on": list(step.depends_on)},
+                    )
+                )
+                continue
+            self._checkpoint(
+                run_id,
+                goal,
+                plan,
+                tuple(completed_steps),
+                tuple(results),
+                status,
+                trace,
+            )
             agent = self._agents.get(step.agent_name)
             tool = self._tools.get(step.tool_call.tool_name)
             resolution = self._tool_use_agent.build(
@@ -115,6 +209,7 @@ class Orchestrator:
                 model_name=model_name,
                 model_mode=model_mode,
                 prior_results=tuple(results),
+                named_results=named_results,
             )
             executable_step = replace(
                 step,
@@ -140,6 +235,7 @@ class Orchestrator:
                     error=resolution.error,
                 )
                 results.append(result)
+                _record_named_result(named_results, step, result)
                 completed_steps.append(replace(executable_step, status="failed"))
                 status = "failed"
                 trace.append(
@@ -153,6 +249,15 @@ class Orchestrator:
                         },
                     )
                 )
+                self._checkpoint(
+                    run_id,
+                    goal,
+                    plan,
+                    tuple(completed_steps),
+                    tuple(results),
+                    status,
+                    trace,
+                )
                 continue
 
             if not _agent_can_use_tool(agent, tool):
@@ -163,6 +268,7 @@ class Orchestrator:
                     error=f"{agent.name} is not allowed to use {tool.name}.",
                 )
                 results.append(result)
+                _record_named_result(named_results, step, result)
                 completed_steps.append(replace(executable_step, status="failed"))
                 status = "failed"
                 trace.append(
@@ -176,6 +282,15 @@ class Orchestrator:
                             "error": result.error,
                         },
                     )
+                )
+                self._checkpoint(
+                    run_id,
+                    goal,
+                    plan,
+                    tuple(completed_steps),
+                    tuple(results),
+                    status,
+                    trace,
                 )
                 continue
 
@@ -217,13 +332,22 @@ class Orchestrator:
                 completed_steps.append(
                     replace(executable_step, status="approval_required")
                 )
-                status = "pending_approval"
+                status = _merge_run_status(status, "pending_approval")
                 trace.append(
                     TraceEvent(
                         "approval.required",
                         f"Approval required for {tool.name}.",
                         data={"approval_id": approval_id, "tool": tool.name},
                     )
+                )
+                self._checkpoint(
+                    run_id,
+                    goal,
+                    plan,
+                    tuple(completed_steps),
+                    tuple(results),
+                    status,
+                    trace,
                 )
                 continue
 
@@ -233,6 +357,16 @@ class Orchestrator:
                 model_mode=model_mode,
                 models=self._models,
                 prior_results=tuple(results),
+            )
+            self._checkpoint(
+                run_id,
+                goal,
+                plan,
+                tuple(completed_steps),
+                tuple(results),
+                status,
+                trace,
+                in_flight_step=executable_step,
             )
             result = self._tools.execute(
                 executable_step.tool_call,
@@ -258,6 +392,7 @@ class Orchestrator:
                     model_name=model_name,
                     model_mode=model_mode,
                     prior_results=tuple(results),
+                    named_results=named_results,
                     feedback=ToolUseFeedback(
                         stage="execution",
                         attempted_arguments=executable_step.tool_call.arguments,
@@ -319,8 +454,11 @@ class Orchestrator:
                             )
                         )
             results.append(result)
+            _record_named_result(named_results, executable_step, result)
             step_status = "completed" if result.success else "failed"
             completed_steps.append(replace(executable_step, status=step_status))
+            if result.success:
+                successful_step_ids.add(executable_step.id)
             trace.append(
                 TraceEvent(
                     f"step.{step_status}",
@@ -334,9 +472,18 @@ class Orchestrator:
                 )
             )
             if not result.success:
-                status = "failed"
+                status = _merge_run_status(status, "failed")
+            self._checkpoint(
+                run_id,
+                goal,
+                plan,
+                tuple(completed_steps),
+                tuple(results),
+                status,
+                trace,
+            )
 
-        final_plan = replace(plan, steps=tuple(completed_steps))
+        final_plan = _plan_with_progress(plan, completed_steps, results)
         synthesis_agent = self._agents.get("synthesis")
         trace.append(
             TraceEvent(
@@ -407,6 +554,15 @@ class Orchestrator:
                 ]
             )
         trace.append(TraceEvent("run.finished", f"Run finished with status {status}."))
+        self._checkpoint(
+            run_id,
+            goal,
+            final_plan,
+            tuple(completed_steps),
+            tuple(results),
+            status,
+            trace,
+        )
 
         return RunResult(
             run_id=run_id,
@@ -416,6 +572,63 @@ class Orchestrator:
             trace=tuple(trace),
             final_response=final_response,
             status=status,
+        )
+
+    def resume(
+        self,
+        run_id: str,
+        model_name: str | None = None,
+        model_mode: str = "balanced",
+    ) -> RunResult:
+        """Continue unattempted eligible nodes from a durable checkpoint."""
+        state = self._load_resume_state(run_id)
+        preview = preview_resume(state)
+        if not preview.eligible_steps:
+            raise ValueError("Run has no eligible unattempted steps to resume.")
+        return self.run(
+            state.goal,
+            model_name=model_name,
+            model_mode=model_mode,
+            _resume_state=state,
+        )
+
+    def resume_preview(self, run_id: str) -> ResumePreview:
+        """Return replay-protected eligibility without executing a tool."""
+        return preview_resume(self._load_resume_state(run_id))
+
+    def _load_resume_state(self, run_id: str) -> ReconstructedRun:
+        if self._journal is None:
+            raise ValueError("Run resume requires trace/checkpoint storage.")
+        state = self._journal.reconstruct(run_id)
+        if state is None:
+            raise ValueError(f"No checkpoint found for run: {run_id}.")
+        if state.status == "completed":
+            raise ValueError("Completed runs cannot be resumed.")
+        return state
+
+    def _checkpoint(
+        self,
+        run_id: str,
+        goal: str,
+        plan,
+        completed_steps: tuple[PlanStep, ...],
+        results: tuple[ToolResult, ...],
+        status: str,
+        trace: list[TraceEvent],
+        in_flight_step: PlanStep | None = None,
+    ) -> None:
+        """Persist a checkpoint when a journal was configured."""
+        if self._journal is None:
+            return
+        self._journal.checkpoint(
+            run_id=run_id,
+            goal=goal,
+            plan=plan,
+            completed_steps=completed_steps,
+            results=results,
+            status=status,
+            trace=tuple(trace),
+            in_flight_step=in_flight_step,
         )
 
     def _suggest_memory(self, goal: str, final_response: str):
@@ -455,10 +668,57 @@ def _agent_can_use_tool(agent: AgentSpec, tool: ToolSpec) -> bool:
     if "*" in agent.allowed_tools or tool.name in agent.allowed_tools:
         return True
     capability = tool.capability
-    return (
-        agent.name in {"calendar", "email", "music"}
-        and capability is not None
-        and capability.domain == agent.name
+    return capability is not None and capability.domain in agent.capability_domains
+
+
+def _merge_run_status(current: str, candidate: str) -> str:
+    """Preserve the most actionable status observed during a run."""
+    if current == "pending_approval" or candidate == "pending_approval":
+        return "pending_approval"
+    if current == "failed" or candidate == "failed":
+        return "failed"
+    return "completed"
+
+
+def _record_named_result(
+    named_results: dict[str, ToolResult],
+    step: PlanStep,
+    result: ToolResult,
+) -> None:
+    """Index a step result by id and optional output key for later bindings."""
+    if not result.success:
+        return
+    named_results[step.id] = result
+    if step.output_key:
+        named_results[step.output_key] = result
+
+
+def _named_results(
+    completed_steps: list[PlanStep],
+    results: list[ToolResult],
+) -> dict[str, ToolResult]:
+    """Rebuild successful named results from checkpointed paired progress."""
+    named: dict[str, ToolResult] = {}
+    for step, result in zip(completed_steps, results):
+        _record_named_result(named, step, result)
+    return named
+
+
+def _plan_with_progress(
+    plan: ExecutionPlan,
+    completed_steps: list[PlanStep],
+    results: list[ToolResult],
+) -> ExecutionPlan:
+    """Preserve the full graph while reflecting persisted node statuses."""
+    by_id = {
+        step.id: (
+            replace(step, status="completed") if result.success else step
+        )
+        for step, result in zip(completed_steps, results)
+    }
+    return replace(
+        plan,
+        steps=tuple(by_id.get(step.id, step) for step in plan.steps),
     )
 
 

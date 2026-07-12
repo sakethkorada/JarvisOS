@@ -35,6 +35,7 @@ from jarvis.integrations.oauth import OAuthManager
 from jarvis.storage.approvals import apply_approved_record
 from jarvis.storage.auth import AuthStore
 from jarvis.storage.memory import MemoryStore
+from jarvis.storage.journal import RunJournal
 from jarvis.storage.traces import TraceSummary
 
 
@@ -48,6 +49,19 @@ def _json_default(value: Any) -> Any:
     if isinstance(value, Path):
         return str(value)
     raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
+
+
+def _print_resume_preview(preview: Any) -> None:
+    """Print a compact deterministic resume preview."""
+    print("Replay-protected steps:")
+    for step in preview.replay_protected_steps:
+        print(f"- {step.id}: {step.status}")
+    print("Eligible steps:")
+    for step in preview.eligible_steps:
+        print(f"- {step.id}: {step.tool_call.tool_name}")
+    print("Blocked steps:")
+    for step in preview.blocked_steps:
+        print(f"- {step.id}: {step.tool_call.tool_name}")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -82,6 +96,30 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Path to a JarvisOS TOML config file.",
     )
+
+    runs_parser = subparsers.add_parser(
+        "runs",
+        help="Inspect and continue checkpointed execution graphs.",
+    )
+    runs_subparsers = runs_parser.add_subparsers(dest="runs_command", required=True)
+    runs_resume = runs_subparsers.add_parser(
+        "resume",
+        help="Resume eligible unattempted steps from a checkpoint.",
+    )
+    runs_resume.add_argument("run_id", help="Checkpointed run id to resume.")
+    runs_resume.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show replay-protected, eligible, and blocked steps without execution.",
+    )
+    runs_resume.add_argument("--json", action="store_true", help="Print JSON.")
+    runs_resume.add_argument("--model", help="Model provider for remaining nodes.")
+    runs_resume.add_argument(
+        "--mode",
+        default="balanced",
+        help="Model routing mode for remaining nodes.",
+    )
+    runs_resume.add_argument("--config", type=Path, help="Path to config.")
 
     subparsers.add_parser("agents", help="List available agents.")
     tools_parser = subparsers.add_parser("tools", help="List available tools.")
@@ -315,6 +353,11 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Path to a JarvisOS TOML config file.",
     )
+    evals_run.add_argument(
+        "--allow-live-integrations",
+        action="store_true",
+        help="Opt into live MCP/plugin/model discovery for this eval run.",
+    )
     return parser
 
 
@@ -326,7 +369,12 @@ def main() -> None:
     if args.command == "run":
         settings = load_settings(args.config)
         try:
-            result = create_default_orchestrator(settings).run(
+            journal = (
+                RunJournal(settings.traces.database_path)
+                if settings.traces.enabled
+                else None
+            )
+            result = create_default_orchestrator(settings, journal=journal).run(
                 args.goal,
                 model_name=args.model,
                 model_mode=args.mode,
@@ -336,6 +384,36 @@ def main() -> None:
             return
         if settings.traces.enabled:
             create_default_trace_store(settings).save_run(result)
+        if args.json:
+            print(json.dumps(result, default=_json_default, indent=2))
+        else:
+            print(result.final_response)
+        return
+
+    if args.command == "runs":
+        settings = load_settings(args.config)
+        if not settings.traces.enabled:
+            parser.error("Run resume requires [traces].enabled = true.")
+            return
+        journal = RunJournal(settings.traces.database_path)
+        orchestrator = create_default_orchestrator(settings, journal=journal)
+        try:
+            preview = orchestrator.resume_preview(args.run_id)
+            if args.dry_run:
+                if args.json:
+                    print(json.dumps(preview, default=_json_default, indent=2))
+                else:
+                    _print_resume_preview(preview)
+                return
+            result = orchestrator.resume(
+                args.run_id,
+                model_name=args.model,
+                model_mode=args.mode,
+            )
+        except (KeyError, ValueError) as exc:
+            parser.error(str(exc))
+            return
+        create_default_trace_store(settings).save_run(result)
         if args.json:
             print(json.dumps(result, default=_json_default, indent=2))
         else:
@@ -558,6 +636,7 @@ def main() -> None:
             model_name=args.model,
             model_mode=args.mode,
             include_raw=args.include_raw,
+            allow_live_integrations=args.allow_live_integrations,
         )
         if args.json:
             print(json.dumps(report, default=_json_default, indent=2))
@@ -838,6 +917,11 @@ def _print_eval_report(report: Any) -> None:
         f"Summary: {report.passed} passed, {report.failed} failed, "
         f"score={report.score:.2f}"
     )
+    if report.infrastructure_failures:
+        print(
+            f"Infrastructure failures excluded from score: "
+            f"{report.infrastructure_failures}"
+        )
     for result in report.results:
         status = "PASS" if result.passed else "FAIL"
         print(f"- {status} {result.id} [{result.kind}] {result.latency_ms:.1f}ms")

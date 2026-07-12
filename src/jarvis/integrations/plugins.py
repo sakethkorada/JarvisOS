@@ -13,7 +13,7 @@ from pathlib import Path
 from types import ModuleType
 from typing import Any, cast
 
-from jarvis.contracts import RiskLevel, ToolHandler, ToolSpec
+from jarvis.contracts import RiskLevel, ToolCapability, ToolHandler, ToolSpec
 from jarvis.tools.registry import ToolRegistry
 
 
@@ -30,6 +30,9 @@ class PluginToolDefinition:
     handler: str
     risk_level: RiskLevel = "low"
     requires_approval: bool = False
+    argument_hints: str | None = None
+    input_schema: dict[str, Any] | None = None
+    capability: ToolCapability | None = None
 
 
 @dataclass(frozen=True)
@@ -83,6 +86,9 @@ def register_plugin_tools(manifest: PluginManifest, registry: ToolRegistry) -> N
                 description=tool.description,
                 risk_level=tool.risk_level,
                 requires_approval=tool.requires_approval,
+                argument_hints=tool.argument_hints,
+                input_schema=tool.input_schema,
+                capability=tool.capability,
                 source=f"plugin:{manifest.name}",
             ),
             handler,
@@ -107,6 +113,78 @@ def _parse_tool(data: Any, manifest_path: Path) -> PluginToolDefinition:
         handler=_required_string(data, "handler"),
         risk_level=cast(RiskLevel, risk_level),
         requires_approval=requires_approval,
+        argument_hints=_optional_string(data, "argument_hints", manifest_path),
+        input_schema=_parse_input_schema(data.get("input_schema"), manifest_path),
+        capability=_parse_capability(data.get("capability"), manifest_path),
+    )
+
+
+def _optional_string(
+    data: dict[str, Any], key: str, manifest_path: Path
+) -> str | None:
+    value = data.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{key} must be a string in {manifest_path}")
+    value = value.strip()
+    return value or None
+
+
+def _parse_input_schema(
+    value: Any, manifest_path: Path
+) -> dict[str, Any] | None:
+    """Validate the conservative JSON-schema subset used by tool execution."""
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"input_schema must be a table in {manifest_path}")
+    schema = dict(value)
+    schema_type = schema.get("type")
+    if schema_type is not None and schema_type != "object":
+        raise ValueError(f"input_schema.type must be 'object' in {manifest_path}")
+    properties = schema.get("properties")
+    if properties is not None and not isinstance(properties, dict):
+        raise ValueError(f"input_schema.properties must be a table in {manifest_path}")
+    required = schema.get("required")
+    if required is not None:
+        if not isinstance(required, list) or not all(
+            isinstance(item, str) and item.strip() for item in required
+        ):
+            raise ValueError(
+                f"input_schema.required must be a list of strings in {manifest_path}"
+            )
+    return schema
+
+
+def _parse_capability(value: Any, manifest_path: Path) -> ToolCapability | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError(f"capability must be a table in {manifest_path}")
+    domain = value.get("domain")
+    operation = value.get("operation")
+    if not isinstance(domain, str) or not domain.strip():
+        raise ValueError(f"capability.domain must be a non-empty string in {manifest_path}")
+    if not isinstance(operation, str) or not operation.strip():
+        raise ValueError(
+            f"capability.operation must be a non-empty string in {manifest_path}"
+        )
+    provider = value.get("provider")
+    if provider is not None and (not isinstance(provider, str) or not provider.strip()):
+        raise ValueError(f"capability.provider must be a string in {manifest_path}")
+    read_only = value.get("read_only", True)
+    demo = value.get("demo", False)
+    if not isinstance(read_only, bool):
+        raise ValueError(f"capability.read_only must be boolean in {manifest_path}")
+    if not isinstance(demo, bool):
+        raise ValueError(f"capability.demo must be boolean in {manifest_path}")
+    return ToolCapability(
+        domain=domain.strip(),
+        operation=operation.strip(),
+        provider=provider.strip() if isinstance(provider, str) else None,
+        read_only=read_only,
+        demo=demo,
     )
 
 

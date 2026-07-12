@@ -77,6 +77,9 @@ python -m jarvis run "Prepare me for my meeting with Jordan tomorrow" --config j
 python -m jarvis run "find notes about Jordan and summarize what you know" --config jarvis.toml.example --model "ollama/llama3.2:3b"
 ```
 
+See [docs/prompt-cookbook.md](docs/prompt-cookbook.md) for current prompt
+examples and capability-specific test commands.
+
 Options:
 
 - `--json` prints the full structured run result, including plan, tool results,
@@ -99,8 +102,9 @@ them, and the agent can retry when validation fails. For explicit read-only,
 low-risk tools, the orchestrator can also feed one argument-like execution
 error back to ToolUseAgent for repair. Auth, token, permission, and timeout
 failures are not retried as argument repairs. Deterministic code still resolves
-`$last.text`, strips unsupported schema keys, applies policy, and fails cleanly
-when valid arguments cannot be produced.
+`$last.<field>` and named `$step.<id>.<field>` references, strips unsupported
+schema keys, applies policy, and fails cleanly when valid arguments cannot be
+produced.
 
 After tool execution, the synthesis agent asks the selected model to write an
 answer-first final response from confirmed tool results. Normal `jarvis run`
@@ -111,7 +115,7 @@ claim, JarvisOS falls back to a concise deterministic grounded answer.
 
 `general.generate_text` is the first internal language capability. The planner
 can use it to generate intermediate text, then pass that text into a following
-tool with `$last.text`. This keeps drafting and language generation in the
+tool with `$last.text` or a named `$step.<id>.<field>` reference. This keeps drafting and language generation in the
 model layer while provider tools such as MCP servers perform their concrete
 actions.
 
@@ -216,6 +220,8 @@ python -m jarvis run "prepare me for my meeting tomorrow" --config jarvis.toml.e
 python -m jarvis traces list --config jarvis.toml.example
 python -m jarvis traces show <run_id> --config jarvis.toml.example
 python -m jarvis traces show <run_id> --config jarvis.toml.example --json
+python -m jarvis runs resume <run_id> --dry-run --config jarvis.toml.example
+python -m jarvis runs resume <run_id> --config jarvis.toml.example
 ```
 
 Trace options:
@@ -240,7 +246,7 @@ provider tools. A suite is a JSON file with `planner` cases for tool choice and
 ```powershell
 python -m jarvis evals run examples/evals/planner-tool-use.json --model "ollama/llama3.2:3b"
 python -m jarvis evals run examples/evals/planner-tool-use.json --model "ollama/llama3.2:3b" --json
-python -m jarvis evals run examples/evals/planner-coverage.json --config jarvis.toml --model "gemini/gemini-3.5-flash" --include-raw --json
+python -m jarvis evals run examples/evals/planner-coverage.json --config jarvis.toml --model "gemini/gemini-3.5-flash" --allow-live-integrations --include-raw --json
 python -m jarvis evals run examples/evals/planner-tool-use.json --model "ollama/llama3.2:3b" --json --include-raw
 ```
 
@@ -250,6 +256,8 @@ keys, and expected argument values. The harness does not call Gmail, Calendar,
 Spotify, or other provider tools; it only evaluates model choices and generated
 arguments against registered tool metadata. If the active config does not
 enable a tool named by the suite, that case fails with an unknown-tool error.
+Eval construction is hermetic by default; add `--allow-live-integrations` when
+you intentionally want live model, plugin, or MCP discovery.
 
 Live provider evals can encounter quota or rate-limit responses. Treat those as
 infrastructure results, not a measure of planner quality; use the JSON report
@@ -486,6 +494,12 @@ JarvisOS can load tools from local MCP stdio servers and remote streamable HTTP
 MCP servers. MCP tools are normalized into the same internal tool registry as
 built-ins and plugins, so the planner, policy engine, trace store, and synthesis
 layer treat them the same way.
+
+Successful tool outputs use a common internal shape: `text`, `records`, `ids`,
+and `metadata`. Adapters can retain their raw protocol response for traces and
+debugging, but synthesis receives only this normalized view. A new MCP wrapper
+should expose structured records when it has them; the planner still selects the
+tool from metadata and schema rather than from provider-specific code.
 
 Example config:
 

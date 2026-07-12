@@ -10,16 +10,18 @@ from typing import Any, Literal
 
 from jarvis.agents import AgentRegistry, default_agent_registry
 from jarvis.contracts import ToolResult
-from jarvis.models import ModelRouter, default_model_router
+from jarvis.models import FakeModelProvider, ModelRouter, default_model_router
 from jarvis.orchestration.arguments import ToolUseAgent
 from jarvis.orchestration.planner import Planner
 from jarvis.prompts import PromptLibrary
 from jarvis.runtime import create_default_tool_registry
 from jarvis.settings import JarvisSettings
+from jarvis.tools import default_tool_registry
 from jarvis.tools.registry import ToolRegistry
 
 
 EvalKind = Literal["planner", "tool_use"]
+FailureType = Literal["none", "model_quality", "infrastructure"]
 
 
 @dataclass(frozen=True)
@@ -65,6 +67,9 @@ class EvalCaseResult:
     actual_arguments: dict[str, Any] = field(default_factory=dict)
     source: str | None = None
     raw_output: str | None = None
+    # Infrastructure failures are reported separately and excluded from the
+    # model-quality score.  ``passed`` and legacy fields remain compatible.
+    failure_type: FailureType = "none"
 
 
 @dataclass(frozen=True)
@@ -78,6 +83,8 @@ class EvalReport:
     failed: int
     score: float
     results: tuple[EvalCaseResult, ...]
+    infrastructure_failures: int = 0
+    model_failures: int = 0
 
 
 def load_eval_suite(path: Path) -> EvalSuite:
@@ -105,11 +112,23 @@ def run_eval_suite(
     agents: AgentRegistry | None = None,
     tools: ToolRegistry | None = None,
     models: ModelRouter | None = None,
+    allow_live_integrations: bool = False,
 ) -> EvalReport:
     """Run a suite without executing provider tools."""
     agents = agents or default_agent_registry()
-    tools = tools or create_default_tool_registry(settings)
-    models = models or default_model_router(settings)
+    # Evaluations should be hermetic by default: MCP discovery, plugins, and
+    # Ollama probing make a suite depend on the developer's machine. Callers
+    # can opt into the historical live registry, or inject registries/models.
+    tools = tools or (
+        create_default_tool_registry(settings)
+        if allow_live_integrations
+        else default_tool_registry()
+    )
+    models = models or (
+        default_model_router(settings)
+        if allow_live_integrations
+        else ModelRouter({"fake-local": FakeModelProvider()}, "fake-local")
+    )
     prompts = PromptLibrary(
         planner_prompt_path=settings.prompts.planner_path,
         synthesis_prompt_path=settings.prompts.synthesis_path,
@@ -138,10 +157,21 @@ def run_eval_suite(
         for case in suite.cases
     )
     passed = sum(1 for result in results if result.passed)
+    infrastructure_failures = sum(
+        1 for result in results if result.failure_type == "infrastructure"
+    )
+    model_failures = sum(
+        1 for result in results if result.failure_type == "model_quality"
+    )
+    scored_results = tuple(
+        result for result in results if result.failure_type != "infrastructure"
+    )
+    # ``failed`` remains the legacy total-failure count. Consumers that need
+    # model-quality scoring should use ``model_failures`` and the score.
     failed = len(results) - passed
     score = (
-        sum(result.score for result in results) / len(results)
-        if results
+        sum(result.score for result in scored_results) / len(scored_results)
+        if scored_results
         else 0.0
     )
     return EvalReport(
@@ -152,6 +182,8 @@ def run_eval_suite(
         failed=failed,
         score=score,
         results=results,
+        infrastructure_failures=infrastructure_failures,
+        model_failures=model_failures,
     )
 
 
@@ -179,10 +211,14 @@ def _run_planner_case(
     include_raw: bool,
 ) -> EvalCaseResult:
     started_at = perf_counter()
-    plan, source, raw_output = planner.create_plan(case.goal, model_name, model_mode)
+    try:
+        plan, source, raw_output = planner.create_plan(case.goal, model_name, model_mode)
+    except Exception as exc:  # evaluation must classify provider/infrastructure faults
+        return _infrastructure_result(case, _error_text(exc), _elapsed_ms(started_at))
     latency_ms = _elapsed_ms(started_at)
     actual_tools = tuple(step.tool_call.tool_name for step in plan.steps)
     errors = _planner_errors(case, actual_tools, source)
+    failure_type = _classify_planner_failure(case, errors, source, raw_output)
     return EvalCaseResult(
         id=case.id,
         kind=case.kind,
@@ -193,6 +229,7 @@ def _run_planner_case(
         actual_tools=actual_tools,
         source=source,
         raw_output=raw_output if include_raw else None,
+        failure_type=failure_type,
     )
 
 
@@ -217,17 +254,26 @@ def _run_tool_use_case(
             errors=(str(exc),),
             latency_ms=_elapsed_ms(started_at),
             actual_tools=(case.tool_name,),
+            failure_type="infrastructure",
         )
-    resolution = tool_use_agent.build(
-        goal=case.goal,
-        tool=tool,
-        arguments=case.rough_arguments,
-        model_name=model_name,
-        model_mode=model_mode,
-        prior_results=case.prior_results,
-    )
+    try:
+        resolution = tool_use_agent.build(
+            goal=case.goal,
+            tool=tool,
+            arguments=case.rough_arguments,
+            model_name=model_name,
+            model_mode=model_mode,
+            prior_results=case.prior_results,
+        )
+    except Exception as exc:
+        return _infrastructure_result(case, _error_text(exc), _elapsed_ms(started_at))
     latency_ms = _elapsed_ms(started_at)
     errors = _tool_use_errors(case, resolution.arguments, resolution.error)
+    failure_type = (
+        "infrastructure"
+        if resolution.error and _looks_like_infrastructure(resolution.error)
+        else ("model_quality" if errors else "none")
+    )
     return EvalCaseResult(
         id=case.id,
         kind=case.kind,
@@ -242,6 +288,7 @@ def _run_tool_use_case(
             if resolution.attempts and resolution.attempts[-1].raw_output
             else None
         ),
+        failure_type=failure_type,
     )
 
 
@@ -300,6 +347,60 @@ def _tool_use_errors(
                 f"Argument {key!r} expected {expected!r}; got {actual!r}."
             )
     return errors
+
+
+def _infrastructure_result(
+    case: EvalCase, error: str, latency_ms: float
+) -> EvalCaseResult:
+    """Build a non-scoring result for provider, registry, or runtime faults."""
+    return EvalCaseResult(
+        id=case.id,
+        kind=case.kind,
+        passed=False,
+        score=0.0,
+        errors=(error,),
+        latency_ms=latency_ms,
+        actual_tools=((case.tool_name,) if case.tool_name else ()),
+        failure_type="infrastructure",
+    )
+
+
+def _error_text(error: Exception) -> str:
+    return f"Evaluation infrastructure failure: {error}"
+
+
+def _looks_like_infrastructure(message: str) -> bool:
+    text = message.lower()
+    markers = (
+        "quota",
+        "rate limit",
+        "timed out",
+        "timeout",
+        "authentication",
+        "api key",
+        "missing dependency",
+        "connection refused",
+        "connection reset",
+        "mcp http request failed",
+        "ollama request failed",
+        "gemini request failed",
+    )
+    return any(marker in text for marker in markers)
+
+
+def _classify_planner_failure(
+    case: EvalCase,
+    errors: list[str],
+    source: str,
+    raw_output: str | None,
+) -> FailureType:
+    if not errors:
+        return "none"
+    # Planner converts provider errors to a fallback with the exception text as
+    # raw output. Invalid JSON/model choices remain model-quality failures.
+    if source == "fallback" and raw_output and _looks_like_infrastructure(raw_output):
+        return "infrastructure"
+    return "model_quality"
 
 
 def _contains_ordered_subset(

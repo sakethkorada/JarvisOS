@@ -7,4 +7,18 @@ description = "Search deterministic demo notes."
 handler = "tools.search_notes"
 risk_level = "low"
 requires_approval = false
+argument_hints = "Use a concise keyword or phrase from the note you want to find."
 
+[tools.input_schema]
+type = "object"
+required = ["query"]
+
+[tools.input_schema.properties.query]
+type = "string"
+
+[tools.capability]
+domain = "notes"
+operation = "search"
+provider = "demo"
+read_only = true
+demo = true

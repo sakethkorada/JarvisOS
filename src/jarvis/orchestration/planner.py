@@ -21,6 +21,7 @@ from jarvis.errors import ModelProviderError
 from jarvis.models import ModelRouter
 from jarvis.orchestration.agent_runtime import AgentRuntime
 from jarvis.orchestration.arguments import resolve_tool_arguments
+from jarvis.orchestration.graph import ExecutionGraph, GraphValidationError
 from jarvis.tools.registry import ToolRegistry
 
 
@@ -149,12 +150,27 @@ class Planner:
             tool_name = step.get("tool_name")
             arguments = step.get("arguments", {})
             description = step.get("description")
+            step_id = step.get("step_id")
+            depends_on = step.get("depends_on", [])
+            output_key = step.get("output_key")
             if not isinstance(tool_name, str) or not self._tools.has(tool_name):
                 return None, f"Unknown or invalid tool_name: {tool_name!r}."
             if not isinstance(arguments, dict):
                 return None, f"Arguments for {tool_name} must be a JSON object."
             if not isinstance(description, str) or not description.strip():
                 return None, f"Description for {tool_name} must be a string."
+            if step_id is not None and (
+                not isinstance(step_id, str) or not step_id.strip()
+            ):
+                return None, f"step_id for {tool_name} must be a non-empty string."
+            if not isinstance(depends_on, list) or not all(
+                isinstance(item, str) and item.strip() for item in depends_on
+            ):
+                return None, f"depends_on for {tool_name} must be a list of step ids."
+            if output_key is not None and (
+                not isinstance(output_key, str) or not output_key.strip()
+            ):
+                return None, f"output_key for {tool_name} must be a non-empty string."
             reference_error = _unsupported_reference_error(arguments)
             if reference_error is not None:
                 return None, reference_error
@@ -169,7 +185,7 @@ class Planner:
                 return None, resolution.error
             arguments = resolution.arguments
 
-            agent_name = _agent_for_tool(self._tools, tool_name)
+            agent_name = _agent_for_tool(self._agents, self._tools, tool_name)
             if not _agent_can_use_tool(
                 self._agents,
                 agent_name,
@@ -179,16 +195,23 @@ class Planner:
                 return None, f"{agent_name} is not allowed to use {tool_name}."
             plan_steps.append(
                 PlanStep(
-                    id=new_id("step"),
+                    id=step_id.strip() if step_id else new_id("step"),
                     agent_name=agent_name,
                     tool_call=ToolCall(tool_name, arguments),
                     description=description.strip(),
+                    depends_on=tuple(depends_on),
+                    output_key=output_key.strip() if output_key else None,
                 )
             )
 
         if not plan_steps:
             return None, "Planner returned no executable steps."
-        return ExecutionPlan(goal=goal, steps=tuple(plan_steps)), None
+        plan = ExecutionPlan(goal=goal, steps=tuple(plan_steps))
+        try:
+            ExecutionGraph(plan)
+        except GraphValidationError as exc:
+            return None, str(exc)
+        return plan, None
 
 
 def _planner_context(available_tools: tuple[AvailableTool, ...]) -> str:
@@ -254,10 +277,12 @@ def _strip_code_fence(text: str) -> str:
 
 def _unsupported_reference_error(value: Any) -> str | None:
     if isinstance(value, str):
-        if value.startswith("$") and not value.startswith("$last."):
+        if value.startswith("$") and not (
+            value.startswith("$last.") or value.startswith("$step.")
+        ):
             return (
                 f"Unsupported planner reference {value!r}. "
-                "Use only $last.<field> references."
+                "Use only $last.<field> or $step.<id>.<field> references."
             )
         return None
     if isinstance(value, list):
@@ -273,14 +298,16 @@ def _unsupported_reference_error(value: Any) -> str | None:
     return None
 
 
-def _agent_for_tool(tools: ToolRegistry, tool_name: str) -> str:
+def _agent_for_tool(
+    agents: AgentRegistry,
+    tools: ToolRegistry,
+    tool_name: str,
+) -> str:
     capability = tools.get(tool_name).capability
-    if capability is not None and capability.domain == "calendar":
-        return "calendar"
-    if capability is not None and capability.domain == "email":
-        return "email"
-    if capability is not None and capability.domain == "music":
-        return "music"
+    if capability is not None:
+        for agent in agents.list():
+            if capability.domain in agent.capability_domains:
+                return agent.name
     if tool_name.startswith("general."):
         return "general"
     if tool_name.startswith("memory."):
@@ -299,16 +326,7 @@ def _agent_can_use_tool(
     tool: ToolSpec | None = None,
 ) -> bool:
     agent = agents.get(agent_name)
-    if agent_name == "calendar" and tool is not None:
-        capability = tool.capability
-        if capability is not None and capability.domain == "calendar":
-            return True
-    if agent_name == "email" and tool is not None:
-        capability = tool.capability
-        if capability is not None and capability.domain == "email":
-            return True
-    if agent_name == "music" and tool is not None:
-        capability = tool.capability
-        if capability is not None and capability.domain == "music":
-            return True
-    return "*" in agent.allowed_tools or tool_name in agent.allowed_tools
+    if "*" in agent.allowed_tools or tool_name in agent.allowed_tools:
+        return True
+    capability = tool.capability if tool is not None else None
+    return capability is not None and capability.domain in agent.capability_domains

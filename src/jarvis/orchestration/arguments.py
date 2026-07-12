@@ -77,6 +77,7 @@ class ToolUseAgent:
         model_mode: str,
         prior_results: tuple[ToolResult, ...] = (),
         feedback: ToolUseFeedback | None = None,
+        named_results: dict[str, ToolResult] | None = None,
     ) -> ArgumentResolution:
         """Return valid tool arguments or a clean model/validation error."""
         base = resolve_tool_arguments(
@@ -84,12 +85,17 @@ class ToolUseAgent:
             tool,
             arguments,
             prior_results=prior_results,
+            named_results=named_results,
             apply_safe_defaults=False,
             validate_schema=False,
         )
         can_repair_with_model = (
             model_name != "fake-local"
-            and (feedback is not None or _should_ask_model(tool, arguments))
+            and (
+                feedback is not None
+                or (base.error is not None and tool.capability is not None)
+                or _should_ask_model(goal, tool, arguments)
+            )
         )
         if base.error is not None and not can_repair_with_model:
             return base
@@ -100,6 +106,7 @@ class ToolUseAgent:
                 tool,
                 arguments,
                 prior_results=prior_results,
+                named_results=named_results,
                 apply_safe_defaults=True,
             )
 
@@ -112,7 +119,7 @@ class ToolUseAgent:
         if (
             validation_error is None
             and feedback is None
-            and not _should_ask_model(tool, arguments)
+            and not _should_ask_model(goal, tool, arguments)
         ):
             return ArgumentResolution(candidate)
 
@@ -129,6 +136,7 @@ class ToolUseAgent:
                         tool=tool,
                         current_arguments=candidate,
                         prior_results=prior_results,
+                        named_results=named_results,
                         validation_error=validation_error,
                         feedback=feedback,
                         attempt=attempt,
@@ -160,6 +168,7 @@ class ToolUseAgent:
                 tool,
                 parsed,
                 prior_results=prior_results,
+                named_results=named_results,
                 apply_safe_defaults=False,
             )
             if resolved.error is not None:
@@ -220,6 +229,7 @@ def resolve_tool_arguments(
     tool: ToolSpec,
     arguments: dict[str, Any],
     prior_results: tuple[ToolResult, ...] = (),
+    named_results: dict[str, ToolResult] | None = None,
     resolve_references: bool = True,
     apply_safe_defaults: bool = True,
     validate_schema: bool = True,
@@ -227,7 +237,7 @@ def resolve_tool_arguments(
     """Resolve references, safe defaults, capability mappings, and schema shape."""
     try:
         resolved = (
-            _resolve_references(arguments, prior_results)
+            _resolve_references(arguments, prior_results, named_results or {})
             if resolve_references
             else dict(arguments)
         )
@@ -244,27 +254,48 @@ def resolve_tool_arguments(
 def _resolve_references(
     arguments: dict[str, Any],
     prior_results: tuple[ToolResult, ...],
+    named_results: dict[str, ToolResult],
 ) -> dict[str, Any]:
     resolved: dict[str, Any] = {}
     for key, value in arguments.items():
-        resolved[str(key)] = _resolve_value(value, prior_results)
+        resolved[str(key)] = _resolve_value(value, prior_results, named_results)
     return resolved
 
 
-def _resolve_value(value: Any, prior_results: tuple[ToolResult, ...]) -> Any:
+def _resolve_value(
+    value: Any,
+    prior_results: tuple[ToolResult, ...],
+    named_results: dict[str, ToolResult],
+) -> Any:
     if isinstance(value, str):
-        return _resolve_string(value, prior_results)
+        return _resolve_string(value, prior_results, named_results)
     if isinstance(value, list):
-        return [_resolve_value(item, prior_results) for item in value]
+        return [_resolve_value(item, prior_results, named_results) for item in value]
     if isinstance(value, dict):
         return {
-            str(key): _resolve_value(item, prior_results)
+            str(key): _resolve_value(item, prior_results, named_results)
             for key, item in value.items()
         }
     return value
 
 
-def _resolve_string(value: str, prior_results: tuple[ToolResult, ...]) -> Any:
+def _resolve_string(
+    value: str,
+    prior_results: tuple[ToolResult, ...],
+    named_results: dict[str, ToolResult],
+) -> Any:
+    if value.startswith("$step."):
+        parts = value.split(".", 2)
+        if len(parts) != 3 or not parts[1] or not parts[2]:
+            raise ValueError(
+                f"Could not resolve {value}: use $step.<id>.<field>."
+            )
+        result = named_results.get(parts[1])
+        if result is None or not result.success:
+            raise ValueError(
+                f"Could not resolve {value}: no prior successful named result."
+            )
+        return _resolve_output_path(value, result.output, parts[2])
     if not value.startswith("$last."):
         return value
     field_name = value.removeprefix("$last.")
@@ -273,12 +304,48 @@ def _resolve_string(value: str, prior_results: tuple[ToolResult, ...]) -> Any:
         raise ValueError(
             f"Could not resolve {value}: no prior successful tool result."
         )
-    if field_name not in last_result.output:
+    return _resolve_output_path(value, last_result.output, field_name)
+
+
+def _resolve_output_path(reference: str, output: dict[str, Any], path: str) -> Any:
+    """Resolve a bounded dotted/indexed path through a normalized tool output."""
+    current: Any = output
+    for token in _reference_tokens(reference, path):
+        if isinstance(token, str):
+            if not isinstance(current, dict) or token not in current:
+                raise ValueError(
+                    f"Could not resolve {reference}: result has no '{token}' field."
+                )
+            current = current[token]
+            continue
+        if not isinstance(current, list) or token >= len(current):
+            raise ValueError(
+                f"Could not resolve {reference}: result has no item at index {token}."
+            )
+        current = current[token]
+    return current
+
+
+def _reference_tokens(reference: str, path: str) -> tuple[str | int, ...]:
+    """Parse ``records[0].id`` without allowing arbitrary expression syntax."""
+    if not path:
+        raise ValueError(f"Could not resolve {reference}: reference path is empty.")
+    tokens: list[str | int] = []
+    position = 0
+    pattern = re.compile(r"(?:^|\.)([A-Za-z_][A-Za-z0-9_]*)|\[(\d+)\]")
+    for match in pattern.finditer(path):
+        if match.start() != position:
+            raise ValueError(
+                f"Could not resolve {reference}: use dotted fields and numeric indexes."
+            )
+        field, index = match.groups()
+        tokens.append(field if field is not None else int(index))
+        position = match.end()
+    if position != len(path):
         raise ValueError(
-            f"Could not resolve {value}: previous result has no "
-            f"'{field_name}' field."
+            f"Could not resolve {reference}: use dotted fields and numeric indexes."
         )
-    return last_result.output[field_name]
+    return tuple(tokens)
 
 
 def _last_successful_result(
@@ -322,14 +389,56 @@ def _remove_none_values(value: Any) -> Any:
     return value
 
 
-def _should_ask_model(tool: ToolSpec, original_arguments: dict[str, Any]) -> bool:
-    capability = tool.capability
-    if capability is not None and capability.domain in {"calendar", "email", "music"}:
+def _should_ask_model(
+    goal: str,
+    tool: ToolSpec,
+    original_arguments: dict[str, Any],
+) -> bool:
+    """Use the model when a schema needs construction or temporal completion."""
+    schema = tool.input_schema
+    if schema is None:
+        return False
+    properties = schema.get("properties", {})
+    if not isinstance(properties, dict) or not properties:
+        return False
+    if not original_arguments:
         return True
-    if not original_arguments and tool.input_schema is not None:
-        properties = tool.input_schema.get("properties", {})
-        return isinstance(properties, dict) and bool(properties)
-    return False
+    if tool.capability is not None:
+        return True
+    temporal_fields = {
+        str(name)
+        for name in properties
+        if any(
+            marker in str(name).lower()
+            for marker in ("date", "time", "start", "end", "before", "after", "min", "max")
+        )
+    }
+    if not temporal_fields or temporal_fields.issubset(original_arguments):
+        return False
+    return _goal_mentions_relative_time(goal)
+
+
+def _goal_mentions_relative_time(goal: str) -> bool:
+    """Detect general relative-time language without choosing a provider tool."""
+    normalized = goal.lower()
+    markers = (
+        "today",
+        "tomorrow",
+        "yesterday",
+        "this week",
+        "next week",
+        "coming",
+        "upcoming",
+        "later",
+        "tonight",
+        "morning",
+        "afternoon",
+        "evening",
+        "day",
+        "week",
+        "month",
+    )
+    return any(marker in normalized for marker in markers)
 
 
 def _schema_error(
@@ -374,6 +483,7 @@ def _tool_use_context(
     tool: ToolSpec,
     current_arguments: dict[str, Any],
     prior_results: tuple[ToolResult, ...],
+    named_results: dict[str, ToolResult] | None,
     validation_error: str | None,
     feedback: ToolUseFeedback | None,
     attempt: int,
@@ -400,6 +510,11 @@ def _tool_use_context(
             for result in prior_results
             if result.success
         ],
+        "named_successful_results": {
+            name: result.output
+            for name, result in (named_results or {}).items()
+            if result.success
+        },
         "validation_error": validation_error,
         "feedback": (
             {

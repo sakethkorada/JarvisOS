@@ -14,12 +14,16 @@ from jarvis.settings import JarvisSettings, load_settings
 from jarvis.storage.auth import AuthStore
 from jarvis.storage.approvals import ApprovalStore
 from jarvis.storage.memory import MemoryExtractor, MemoryStore
+from jarvis.storage.journal import RunJournal
 from jarvis.storage.tasks import TaskStore
 from jarvis.storage.traces import TraceStore
 from jarvis.tools import ToolRegistry, default_tool_registry
 
 
-def create_default_orchestrator(settings: JarvisSettings | None = None) -> Orchestrator:
+def create_default_orchestrator(
+    settings: JarvisSettings | None = None,
+    journal: RunJournal | None = None,
+) -> Orchestrator:
     """Create the default local runtime with built-in registries."""
     settings = settings or load_settings()
     memory_store = (
@@ -58,6 +62,7 @@ def create_default_orchestrator(settings: JarvisSettings | None = None) -> Orche
             else None
         ),
         auto_write_memory=settings.memory.auto_write,
+        journal=journal,
     )
 
 

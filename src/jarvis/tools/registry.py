@@ -12,6 +12,7 @@ from jarvis.contracts import (
     ToolSpec,
 )
 from jarvis.tool_schemas import normalize_arguments_for_schema
+from jarvis.tools.results import normalize_tool_output
 
 
 class ToolRegistry:
@@ -64,7 +65,10 @@ class ToolRegistry:
                 output = self._context_handlers[spec.name](arguments, context)
             else:
                 output = self._handlers[spec.name](arguments)
-            return ToolResult(tool_name=spec.name, output=output)
+            return ToolResult(
+                tool_name=spec.name,
+                output=normalize_tool_output(output, source=spec.source),
+            )
         except Exception as exc:  # pragma: no cover - defensive boundary
             return ToolResult(
                 tool_name=spec.name,

@@ -58,10 +58,10 @@ def create_mcp_server(
     mcp = FastMCP("JarvisOS Google Calendar")
 
     @mcp.tool()
-    def list_calendars(max_results: int = 50) -> str:
+    def list_calendars(max_results: int = 50) -> dict[str, Any]:
         """List calendars available to the authenticated Google user."""
-        return _tool_text(
-            lambda: list_calendars_text(
+        return _tool_result(
+            lambda: list_calendars_result(
                 auth_db=auth_db,
                 config_path=config_path,
                 provider=provider,
@@ -76,13 +76,13 @@ def create_mcp_server(
         start_time: str | None = None,
         end_time: str | None = None,
         max_results: int = 10,
-    ) -> str:
+    ) -> dict[str, Any]:
         """List calendar events for scheduling or meeting-context requests.
 
         Returns event titles and times, not related email or notes.
         """
-        return _tool_text(
-            lambda: list_events_text(
+        return _tool_result(
+            lambda: list_events_result(
                 auth_db=auth_db,
                 config_path=config_path,
                 provider=provider,
@@ -105,14 +105,34 @@ def list_calendars_text(
     max_results: int = 50,
 ) -> str:
     """Return a readable list of Google calendars from REST."""
+    return str(
+        list_calendars_result(
+            auth_db=auth_db,
+            config_path=config_path,
+            provider=provider,
+            api_base_url=api_base_url,
+            max_results=max_results,
+        )["text"]
+    )
+
+
+def list_calendars_result(
+    auth_db: Path,
+    config_path: Path | None,
+    provider: str,
+    api_base_url: str,
+    max_results: int = 50,
+) -> dict[str, Any]:
+    """Return normalized calendar records for MCP consumers."""
     token = _access_token(auth_db, config_path, provider)
     query = urlencode({"maxResults": max(1, min(int(max_results), 250))})
     data = _request_json(f"{api_base_url.rstrip('/')}/users/me/calendarList?{query}", token)
     calendars = data.get("items", [])
     if not isinstance(calendars, list) or not calendars:
-        return "No calendars found."
+        return {"text": "No calendars found.", "records": [], "ids": []}
 
     lines = ["Calendars:"]
+    records: list[dict[str, Any]] = []
     for calendar in calendars:
         if not isinstance(calendar, dict):
             continue
@@ -121,7 +141,20 @@ def list_calendars_text(
         role = str(calendar.get("accessRole", "unknown"))
         primary = " primary" if calendar.get("primary") is True else ""
         lines.append(f"- {summary} ({calendar_id}, {role}{primary})")
-    return "\n".join(lines)
+        records.append(
+            {
+                "id": calendar_id,
+                "title": summary,
+                "access_role": role,
+                "primary": calendar.get("primary") is True,
+            }
+        )
+    return {
+        "text": "\n".join(lines),
+        "records": records,
+        "ids": [record["id"] for record in records],
+        "metadata": {"record_type": "calendar"},
+    }
 
 
 def list_events_text(
@@ -135,6 +168,31 @@ def list_events_text(
     max_results: int = 10,
 ) -> str:
     """Return a readable list of Google Calendar events from REST."""
+    return str(
+        list_events_result(
+            auth_db=auth_db,
+            config_path=config_path,
+            provider=provider,
+            api_base_url=api_base_url,
+            calendar_id=calendar_id,
+            start_time=start_time,
+            end_time=end_time,
+            max_results=max_results,
+        )["text"]
+    )
+
+
+def list_events_result(
+    auth_db: Path,
+    config_path: Path | None,
+    provider: str,
+    api_base_url: str,
+    calendar_id: str = "primary",
+    start_time: str | None = None,
+    end_time: str | None = None,
+    max_results: int = 10,
+) -> dict[str, Any]:
+    """Return normalized event records for MCP consumers."""
     token = _access_token(auth_db, config_path, provider)
     query: dict[str, Any] = {
         "singleEvents": "true",
@@ -151,9 +209,10 @@ def list_events_text(
     data = _request_json(url, token)
     events = data.get("items", [])
     if not isinstance(events, list) or not events:
-        return "No events found."
+        return {"text": "No events found.", "records": [], "ids": []}
 
     lines = [f"Events for {calendar_id}:"]
+    records: list[dict[str, Any]] = []
     for event in events:
         if not isinstance(event, dict):
             continue
@@ -162,15 +221,29 @@ def list_events_text(
         end = _event_time(event.get("end"))
         event_id = str(event.get("id", "unknown"))
         lines.append(f"- {summary} ({start} to {end}, id={event_id})")
-    return "\n".join(lines)
+        records.append(
+            {
+                "id": event_id,
+                "title": summary,
+                "start_time": start,
+                "end_time": end,
+                "calendar_id": calendar_id,
+            }
+        )
+    return {
+        "text": "\n".join(lines),
+        "records": records,
+        "ids": [record["id"] for record in records],
+        "metadata": {"record_type": "calendar_event", "calendar_id": calendar_id},
+    }
 
 
-def _tool_text(handler: Callable[[], str]) -> str:
-    """Return tool text while keeping auth errors in-band for MCP clients."""
+def _tool_result(handler: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+    """Return structured data while keeping auth errors in-band for MCP clients."""
     try:
         return handler()
     except RuntimeError as exc:
-        return f"AUTH_ERROR: {exc}"
+        return {"text": f"AUTH_ERROR: {exc}", "records": [], "ids": []}
 
 
 def _parse_args() -> argparse.Namespace:

@@ -16,6 +16,7 @@ from jarvis.contracts import (
 from jarvis.errors import ModelProviderError
 from jarvis.models import ModelRouter
 from jarvis.orchestration.agent_runtime import AgentRuntime
+from jarvis.tools.results import public_tool_output
 
 
 @dataclass(frozen=True)
@@ -162,8 +163,13 @@ def grounded_result_lines(results: tuple[ToolResult, ...]) -> list[str]:
                     lines.append(f"- {step}")
         elif result.tool_name == "task.create_summary":
             continue
-        elif result.output.get("text"):
-            lines.append(str(result.output["text"]))
+        else:
+            normalized = public_tool_output(result.output)
+            records = normalized["records"]
+            if records:
+                lines.extend(_record_lines(result.tool_name, records))
+            elif normalized["text"]:
+                lines.append(_compact_text(normalized["text"]))
     return lines
 
 
@@ -189,7 +195,7 @@ def _synthesis_context(
         "successful_tool_results": [
             {
                 "tool_name": result.tool_name,
-                "output": result.output,
+                "output": public_tool_output(result.output),
             }
             for result in successful_results
         ],
@@ -197,7 +203,7 @@ def _synthesis_context(
             {
                 "tool_name": result.tool_name,
                 "error": result.error,
-                "output": result.output,
+                "output": public_tool_output(result.output),
             }
             for result in failed_results
         ],
@@ -219,7 +225,7 @@ def _is_supported_synthesis(
     """Reject obvious claims that are not supported by run data."""
     lowered = text.lower()
     source_text = json.dumps(
-        [result.output for result in results],
+        [public_tool_output(result.output) for result in results],
         sort_keys=True,
     ).lower()
     has_pending_approval = any(
@@ -356,3 +362,41 @@ def _contains_term(text: str, term: str) -> bool:
 def _sentences(text: str) -> tuple[str, ...]:
     """Split concise synthesis text into sentences for failure-claim checks."""
     return tuple(sentence for sentence in re.split(r"(?<=[.!?])\s+", text) if sentence)
+
+
+def _record_lines(tool_name: str, records: list[dict[str, object]]) -> list[str]:
+    """Render a bounded, provider-neutral view of structured records."""
+    lines = [f"{tool_name}: {len(records)} result(s)"]
+    for record in records[:5]:
+        title = _record_title(record)
+        details = _record_details(record)
+        suffix = f" - {details}" if details else ""
+        lines.append(f"- {title}{suffix}")
+    if len(records) > 5:
+        lines.append(f"- {len(records) - 5} more result(s)")
+    return lines
+
+
+def _record_title(record: dict[str, object]) -> str:
+    for key in ("title", "subject", "name", "summary", "label"):
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return "Untitled result"
+
+
+def _record_details(record: dict[str, object]) -> str:
+    values: list[str] = []
+    for key in ("start_time", "received_at", "sender", "artist", "snippet"):
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            values.append(value.strip())
+    return " | ".join(values[:3])
+
+
+def _compact_text(text: str, limit: int = 600) -> str:
+    """Prevent fallback output from dumping an unbounded provider payload."""
+    normalized = " ".join(text.split())
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[: limit - 3].rstrip() + "..."

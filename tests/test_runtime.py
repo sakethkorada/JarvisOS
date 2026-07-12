@@ -38,7 +38,7 @@ from jarvis.orchestration.arguments import ToolUseAgent, ToolUseFeedback
 from jarvis.orchestration.arguments import resolve_tool_arguments
 from jarvis.orchestration.orchestrator import Orchestrator
 from jarvis.orchestration.planner import Planner
-from jarvis.orchestration.synthesizer import _is_supported_synthesis
+from jarvis.orchestration.synthesizer import _is_supported_synthesis, deterministic_summary
 from jarvis.agents import default_agent_registry
 from jarvis.policies import PolicyEngine
 from jarvis.prompts import PromptLibrary
@@ -51,6 +51,7 @@ from jarvis.integrations.mcp import (
     McpHttpClient,
     McpStdioClient,
     _mcp_tool_capability,
+    _normalize_mcp_result,
     _resolved_command,
 )
 from jarvis.integrations.oauth import OAuthManager
@@ -59,6 +60,7 @@ from jarvis.settings import OAuthProviderSettings
 from jarvis.storage.auth import AuthStore
 from jarvis.storage.tasks import TaskStore
 from jarvis.tools import ToolRegistry, default_tool_registry
+from jarvis.tools.results import normalize_tool_output, public_tool_output
 from jarvis.storage.traces import TraceStore
 from jarvis.cli import _auth_debug, _parse_args_json, _print_tool_result
 from jarvis.cli import main as cli_main
@@ -81,6 +83,61 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result.final_response, "Done.")
         trace_types = [event.event_type for event in result.trace]
         self.assertIn("synthesis.completed", trace_types)
+
+    def test_registry_normalizes_generic_tool_records(self) -> None:
+        registry = ToolRegistry()
+        registry.register(
+            ToolSpec(name="demo.records", description="Return generic records."),
+            lambda arguments: {"items": [{"id": "item-1", "title": "One"}]},
+        )
+
+        result = registry.execute(ToolCall("demo.records", {}))
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.output["records"], [{"id": "item-1", "title": "One"}])
+        self.assertEqual(result.output["ids"], ["item-1"])
+        self.assertEqual(result.output["text"], "")
+        self.assertEqual(result.output["metadata"]["source"], "builtin")
+
+    def test_public_tool_output_hides_raw_provider_payload(self) -> None:
+        output = normalize_tool_output(
+            {
+                "text": "Found one item.",
+                "records": [{"id": "item-1", "title": "One"}],
+                "mcp_result": {"private": "debug payload"},
+            },
+            source="mcp",
+        )
+
+        self.assertEqual(
+            public_tool_output(output),
+            {
+                "text": "Found one item.",
+                "records": [{"id": "item-1", "title": "One"}],
+                "ids": ["item-1"],
+                "metadata": {"source": "mcp"},
+            },
+        )
+
+    def test_deterministic_summary_renders_records_without_raw_payload(self) -> None:
+        result = ToolResult(
+            tool_name="demo.records",
+            output=normalize_tool_output(
+                {
+                    "records": [
+                        {"id": "item-1", "title": "One", "sender": "Taylor"},
+                        {"id": "item-2", "title": "Two"},
+                    ],
+                    "mcp_result": {"large": "raw payload"},
+                }
+            ),
+        )
+
+        summary = deterministic_summary("Review records", (result,), "completed")
+
+        self.assertIn("demo.records: 2 result(s)", summary)
+        self.assertIn("One - Taylor", summary)
+        self.assertNotIn("raw payload", summary)
 
     def test_meeting_goal_degrades_without_calendar_capability(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1922,6 +1979,62 @@ class ArgumentResolverTests(unittest.TestCase):
 
         self.assertIn("no prior successful tool result", resolution.error or "")
 
+    def test_resolver_resolves_structured_record_id_path(self) -> None:
+        tool = ToolSpec(name="demo.detail", description="Read one record.")
+        prior = (
+            ToolResult(
+                tool_name="demo.search",
+                output={"records": [{"id": "record-7", "title": "Release notes"}]},
+            ),
+        )
+
+        resolution = resolve_tool_arguments(
+            "Read the first result.",
+            tool,
+            {"record_id": "$last.records[0].id"},
+            prior_results=prior,
+        )
+
+        self.assertIsNone(resolution.error)
+        self.assertEqual(resolution.arguments, {"record_id": "record-7"})
+
+    def test_resolver_resolves_named_structured_record_id_path(self) -> None:
+        tool = ToolSpec(name="demo.detail", description="Read one record.")
+        result = ToolResult(
+            tool_name="demo.search",
+            output={"records": [{"id": "record-7"}]},
+        )
+
+        resolution = resolve_tool_arguments(
+            "Read the selected result.",
+            tool,
+            {"record_id": "$step.search.records[0].id"},
+            named_results={"search": result},
+        )
+
+        self.assertIsNone(resolution.error)
+        self.assertEqual(resolution.arguments, {"record_id": "record-7"})
+
+    def test_resolver_rejects_unsafe_or_missing_reference_paths(self) -> None:
+        tool = ToolSpec(name="demo.detail", description="Read one record.")
+        prior = (ToolResult(tool_name="demo.search", output={"records": []}),)
+
+        resolution = resolve_tool_arguments(
+            "Read the first result.",
+            tool,
+            {"record_id": "$last.records[0].id"},
+            prior_results=prior,
+        )
+        unsafe = resolve_tool_arguments(
+            "Read the first result.",
+            tool,
+            {"record_id": "$last.records['id']"},
+            prior_results=prior,
+        )
+
+        self.assertIn("no item at index 0", resolution.error or "")
+        self.assertIn("dotted fields and numeric indexes", unsafe.error or "")
+
 
 class ArgumentBuilderTests(unittest.TestCase):
     """Tests for model-backed tool argument building and repair."""
@@ -2465,6 +2578,116 @@ class SynthesisTests(unittest.TestCase):
 
 class ToolUseOrchestratorTests(unittest.TestCase):
     """Tests for ToolUseAgent integration in orchestration."""
+
+    def test_generic_multitool_record_handoff_and_grounded_fallback(self) -> None:
+        provider = SequencedModelProvider(
+            [
+                """
+{
+  "steps": [
+    {
+      "step_id": "find",
+      "tool_name": "demo.search",
+      "arguments": {"query": "release"},
+      "description": "Find matching records."
+    },
+    {
+      "step_id": "detail",
+      "tool_name": "demo.detail",
+      "arguments": {"record_id": "$step.find.records[0].id"},
+      "description": "Read the first matching record.",
+      "depends_on": ["find"]
+    },
+    {
+      "step_id": "page",
+      "tool_name": "demo.page",
+      "arguments": {"page": 2},
+      "description": "Read the next generic page."
+    }
+  ]
+}
+""".strip(),
+                '{"query": "release"}',
+                '{"record_id": "record-7"}',
+                '{"page": 2}',
+                "",
+            ]
+        )
+        calls: list[tuple[str, dict[str, object]]] = []
+        tools = ToolRegistry()
+        tools.register(
+            ToolSpec(
+                name="demo.search",
+                description="Search generic records.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"query": {"type": "string"}},
+                    "required": ["query"],
+                },
+                capability=ToolCapability(domain="knowledge", operation="search"),
+            ),
+            lambda arguments: (
+                calls.append(("search", dict(arguments)))
+                or {"records": [{"id": "record-7", "title": "Release notes"}]}
+            ),
+        )
+        tools.register(
+            ToolSpec(
+                name="demo.detail",
+                description="Read one generic record by id.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"record_id": {"type": "string"}},
+                    "required": ["record_id"],
+                },
+                capability=ToolCapability(domain="knowledge", operation="get"),
+            ),
+            lambda arguments: (
+                calls.append(("detail", dict(arguments)))
+                or {"records": [{"id": arguments["record_id"], "title": "Release detail"}]}
+            ),
+        )
+        tools.register(
+            ToolSpec(
+                name="demo.page",
+                description="Read a generic paginated result page.",
+                input_schema={
+                    "type": "object",
+                    "properties": {"page": {"type": "integer"}},
+                    "required": ["page"],
+                },
+                capability=ToolCapability(domain="knowledge", operation="list"),
+            ),
+            lambda arguments: (
+                calls.append(("page", dict(arguments)))
+                or {"records": [{"id": "page-2", "title": "Second page"}]}
+            ),
+        )
+        orchestrator = Orchestrator(
+            agents=default_agent_registry(),
+            tools=tools,
+            models=ModelRouter({provider.name: provider}, provider.name),
+            policies=PolicyEngine(),
+            planner_prompt=PromptLibrary().planner_prompt(),
+            synthesis_prompt=PromptLibrary().synthesis_prompt(),
+            tool_use_prompt=PromptLibrary().tool_use_prompt(),
+        )
+
+        result = orchestrator.run("Find a release, inspect it, and load page two.", provider.name)
+
+        self.assertEqual(result.status, "completed")
+        self.assertEqual(
+            calls,
+            [
+                ("search", {"query": "release"}),
+                ("detail", {"record_id": "record-7"}),
+                ("page", {"page": 2}),
+            ],
+        )
+        self.assertIn("demo.search: 1 result(s)", result.final_response)
+        self.assertIn("Release detail", result.final_response)
+        self.assertIn("Second page", result.final_response)
+        self.assertNotIn("mcp_result", result.final_response)
 
     def test_read_only_tool_execution_error_can_be_repaired(self) -> None:
         provider = SequencedModelProvider(
@@ -3221,6 +3444,23 @@ class GoogleCalendarFastMcpWrapperTests(unittest.TestCase):
             ["2026-07-05T00:00:00Z"],
         )
 
+    def test_list_events_returns_normalized_records(self) -> None:
+        module = _google_calendar_fastmcp_module()
+        with _calendar_api_server() as api_base_url:
+            with TemporaryDirectory() as temp_dir:
+                auth_db = Path(temp_dir) / "auth.sqlite3"
+                AuthStore(auth_db).set_token("google", _CalendarApiHandler.expected_token)
+                result = module.list_events_result(
+                    auth_db=auth_db,
+                    config_path=None,
+                    provider="google",
+                    api_base_url=api_base_url,
+                )
+
+        self.assertEqual(result["ids"], ["evt-1"])
+        self.assertEqual(result["records"][0]["title"], "Planning Sync")
+        self.assertEqual(result["records"][0]["start_time"], "2026-07-04T09:00:00Z")
+
 
 class GoogleGmailFastMcpWrapperTests(unittest.TestCase):
     """Tests for the local FastMCP Gmail REST wrapper."""
@@ -3276,6 +3516,23 @@ class GoogleGmailFastMcpWrapperTests(unittest.TestCase):
         )
         self.assertIn("Recent Gmail messages:", text)
         self.assertIn("Project update", text)
+
+    def test_list_recent_returns_normalized_records(self) -> None:
+        module = _google_gmail_fastmcp_module()
+        with _gmail_api_server() as api_base_url:
+            with TemporaryDirectory() as temp_dir:
+                auth_db = Path(temp_dir) / "auth.sqlite3"
+                AuthStore(auth_db).set_token("google", _GmailApiHandler.expected_token)
+                result = module.list_recent_result(
+                    auth_db=auth_db,
+                    config_path=None,
+                    provider="google",
+                    api_base_url=api_base_url,
+                )
+
+        self.assertEqual(result["ids"], ["msg-1"])
+        self.assertEqual(result["records"][0]["subject"], "Project update")
+        self.assertEqual(result["records"][0]["sender"], "Jordan <jordan@example.com>")
 
     def test_get_message_formats_one_message(self) -> None:
         module = _google_gmail_fastmcp_module()
@@ -3431,6 +3688,38 @@ class McpTests(unittest.TestCase):
 
         self.assertEqual(tools[0]["name"], "echo")
         self.assertEqual(result["content"][0]["text"], "demo echo: hello")
+
+    def test_mcp_result_normalizes_structured_content(self) -> None:
+        output = _normalize_mcp_result(
+            {
+                "content": [{"type": "text", "text": "Found one note."}],
+                "structuredContent": {
+                    "records": [{"id": "note-1", "title": "Project notes"}],
+                    "metadata": {"record_type": "note"},
+                },
+            }
+        )
+
+        self.assertEqual(output["text"], "Found one note.")
+        self.assertEqual(output["ids"], ["note-1"])
+        self.assertEqual(output["records"][0]["title"], "Project notes")
+        self.assertEqual(output["metadata"]["record_type"], "note")
+
+    def test_mcp_result_rejects_embedded_auth_error(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "client_secret is missing"):
+            _normalize_mcp_result(
+                {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": '{"text":"AUTH_ERROR: client_secret is missing"}',
+                        }
+                    ],
+                    "structuredContent": {
+                        "text": "AUTH_ERROR: client_secret is missing",
+                    },
+                }
+            )
 
     def test_mcp_client_reports_subprocess_stderr(self) -> None:
         with TemporaryDirectory() as temp_dir:

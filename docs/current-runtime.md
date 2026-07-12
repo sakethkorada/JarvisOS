@@ -3,6 +3,8 @@
 This document describes what the runtime does right now. It should be updated
 whenever a slice changes the shape of execution.
 
+See [docs/prompt-cookbook.md](prompt-cookbook.md) for runnable current goals.
+
 See `docs/architecture.md` for the current package ownership map.
 
 ## Cloud Models
@@ -21,6 +23,7 @@ CLI command
   -> default runtime factory
   -> orchestrator
   -> planner
+  -> graph validation and deterministic dependency ordering
   -> planner AgentRuntime resolves execution_role=planner
   -> bundled or user-configured planner prompt
   -> selected model provider for optional LLM planning
@@ -54,6 +57,10 @@ eval suite JSON
 - Non-fake models can propose JSON execution plans using registered tools.
 - LLM plans are validated before execution and fall back to deterministic
   planning if invalid.
+- Accepted plans are validated as dependency graphs. The current executor runs
+  the graph sequentially in deterministic topological order, and optional
+  SQLite run checkpoints record plan progress, results, status, and trace length
+  for later resume/replay work.
 - Planner, ToolUseAgent, and synthesis prompts load from bundled markdown files,
   with optional config overrides.
 - Agent profiles now carry execution metadata such as `execution_role`,
@@ -69,6 +76,9 @@ eval suite JSON
   examples wrap Google Calendar, Gmail, and Spotify read tools.
 - MCP tool `inputSchema` values are preserved on `ToolSpec`, exposed to the
   planner, and used for conservative argument cleanup before execution.
+- Successful tool results expose `text`, `records`, `ids`, and `metadata`.
+  Raw MCP protocol payloads remain trace/debug data and are excluded from
+  synthesis context; local Calendar and Gmail wrappers emit structured records.
 - Tool-local `argument_hints` can be attached through MCP tool overrides or
   bundled capability packs. ToolUseAgent receives only the selected tool's hints
   when building JSON arguments.
@@ -106,16 +116,18 @@ eval suite JSON
   cases without executing provider tools. The initial scorer checks expected
   tool choices, forbidden tools, fallback usage, maximum step count, required
   argument keys, forbidden argument keys, and expected argument values.
+  Eval construction is hermetic by default; use
+  `--allow-live-integrations` only for explicit model/plugin/MCP discovery.
 - `general.generate_text` can generate intermediate text with the selected
   model before another tool uses it.
 - `system.current_datetime` can answer current local date/time questions and
   gives the planner a safe runtime-context tool instead of relying on model
   guesses about today's date.
-- Plan steps can pass the previous successful tool result's `text` field with
-  `$last.text`.
+- Plan steps can pass the previous successful tool result with `$last.<field>`
+  or a named successful step result with `$step.<id>.<field>`.
 - Planner validation rejects unsupported reference syntax such as `$result.text`
-  and gives the model one repair attempt. Only `$last.<field>` references are
-  supported today.
+  and gives the model one repair attempt. Supported references are
+  `$last.<field>` and `$step.<id>.<field>`.
 - The synthesis agent can use the selected model to write the final answer from
   confirmed tool results.
 - Normal `jarvis run` output is answer-first. It avoids routine runtime
@@ -216,50 +228,36 @@ eval suite JSON
   grounded lines from actual tool outputs instead of debug-style run summaries.
 - `general.generate_text` is the first model-backed internal language
   capability. Specialist prompt/config layers can become richer later.
-- Step data flow only supports a minimal `$last.text` reference today. Richer
-  workflow variables, named outputs, and dependency graphs can come later.
-- Tool execution approvals can be recorded, but approved tool calls are not
-  automatically resumed yet.
+- Step data flow supports `$last.<path>` and named `$step.<id>.<path>`
+  references, including safe numeric record indexes such as
+  `$step.find.records[0].id`.
+- The graph is currently executed sequentially. `jarvis runs resume <run_id>`
+  reconstructs the latest checkpoint and continues only never-attempted nodes
+  whose dependencies succeeded. `--dry-run` displays replay-protected,
+  eligible, and blocked nodes without executing them.
+- Tool execution approvals can be recorded, but approved external tool calls
+  are not automatically replayed. Previously attempted nodes remain
+  replay-protected until explicit idempotent retry support exists.
 - Online plugin acquisition is not implemented yet. Future online plugins should
   be downloaded into local plugin folders before runtime loading.
 
 ## Known Design Pressure
 
-- Global auth profile lookup is implemented, but the next cleanup should make
-  first-run auth setup more explicit. A future `jarvis auth connect <provider>`
-  or profile-init command can write `.jarvis/auth.toml` without asking users to
-  hand-edit provider metadata.
-- Calendar argument construction is no longer a hand-written phrase parser.
-  ToolUseAgent should infer dates and target IDs from the goal, schema, and
-  selected tool's argument hints. As more providers land, improve schemas,
-  hints, descriptions, planner prompts, retry/repair behavior, and trace-based
-  evals instead of adding provider or keyword branches to `planner.py`.
-- The bundled planner prompt now teaches generic tool selection behavior instead
-  of hardcoding Calendar/Gmail/Spotify routing. Tool-specific guidance should
-  continue to come from tool descriptions, schemas, capability metadata, and
-  tool-local hints.
-- ToolUseAgent now repairs validation failures and one safe read-only
-  argument-like execution failure. The next output cleanup is making long tool
-  payloads easier to skim, especially `jarvis tools` and large provider reads.
-- Once single-tool argument construction is reliable, add more tools through
-  the same schema-aware path instead of adding per-provider planner branches.
-  The target is one general tool-use prompt/path that can call Calendar, Gmail,
-  Spotify, memory, notes, and plugins from their declared schemas.
-- Multi-tool goals should accumulate confirmed tool results across steps and
-  let synthesis combine them into one grounded response. Replanning loops and
-  repeated tool calls should wait until the one-pass path and provider-error
-  repair are stable.
-- Multi-model routing has an initial role substrate. Gemini is the first cloud
-  `ModelProvider` adapter and can route selected roles such as `planner` or
-  `tool_use` without changing tool adapters. Its API key remains in
-  `GEMINI_API_KEY`; provider quotas and rate limits remain outside the current
-  router's scope.
-- The next offline hardening work is argument and output quality: for example,
-  an "upcoming" Calendar goal needs bounded future arguments, and synthesis
-  needs concise grounded summaries from structured provider results.
-- Tool configs should remain about enabled capabilities. Missing auth,
-  unavailable tools, expired tokens, and missing environment secrets should flow
-  through structured runtime errors rather than being treated as planner logic.
+- Resume now protects every attempted node from replay. The next lifecycle
+  pressure is explicit idempotency support for opt-in retries of external
+  actions, plus richer approval continuation.
+- Approved external tool calls still require an explicit apply/idempotent retry
+  path.
+- Independent graph nodes are ordered deterministically but not yet concurrent;
+  add bounded concurrency only after restart and cancellation tests exist.
+- MCP sessions are still short-lived for stdio calls and HTTP lifecycle support
+  remains intentionally basic. Revisit session reuse when repeated/concurrent
+  graph calls create measurable pressure.
+- Auth profile initialization, encrypted token storage, dynamic MCP auth
+  discovery, and online plugin acquisition remain future work.
+- Provider-specific behavior must stay in adapters and metadata. Missing auth,
+  unavailable tools, expired tokens, quotas, and timeouts must remain structured
+  runtime/evaluation failures rather than planner branches.
 
 ## Useful Commands
 

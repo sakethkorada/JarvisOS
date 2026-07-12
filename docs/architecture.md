@@ -9,11 +9,12 @@ should fit one of these boundaries before adding another top-level module.
 CLI
   -> runtime factory
   -> orchestration planner
-  -> deterministic validation
+  -> graph validation and dependency ordering
+  -> checkpointed node execution
   -> policy and approval checks
-  -> tool execution
+  -> normalized tool results
   -> synthesis
-  -> traces and final response
+  -> traces, checkpoints, and final response
 ```
 
 ## Package Boundaries
@@ -28,14 +29,15 @@ CLI
 - `jarvis.agents` defines available agent routing specs.
 - `jarvis.prompts` loads bundled and configured prompt files.
 - `jarvis.orchestration` owns planning, step execution, argument references,
-  agent runtime wrappers, and final synthesis.
+  graph validation/scheduling, checkpoint hooks, agent runtime wrappers, and
+  final synthesis.
 - `jarvis.tools` owns the tool registry and built-in local tools.
 - `jarvis.models` owns model providers and routing.
 - `jarvis.integrations` owns external adapters such as MCP, OAuth, and local
   plugins.
 - `jarvis.evals` owns isolated planner and ToolUseAgent evaluation harnesses.
 - `jarvis.storage` owns SQLite-backed memory, tasks, traces, approvals, and
-  integration auth tokens.
+  integration auth tokens, plus run checkpoints for graph reconstruction.
 
 ## Import Rule
 
@@ -123,6 +125,12 @@ provider-declared input schemas during registration so planners can see valid
 argument shapes and the execution boundary can strip unsupported arguments or
 fail missing required fields before provider calls.
 
+Successful tool results are normalized to `text`, `records`, `ids`, and
+`metadata`. Adapter-specific raw payloads may remain attached for trace and
+debug use, but the synthesis context receives only the normalized public view.
+This lets records from an MCP server, plugin, or local tool flow through the
+same later-step and final-answer path without provider-specific parsing.
+
 Tool-local argument hints also belong on `ToolSpec`. These are short
 selected-tool-only instructions, such as provider query syntax or conservative
 defaults, that improve ToolUseAgent accuracy without bloating the global
@@ -188,9 +196,12 @@ The intended tool-use path is:
 
 ```text
 planner chooses capabilities
+  -> graph validates dependencies and named outputs
+  -> ready node enters the execution graph
   -> ToolUseAgent builds or repairs JSON arguments from schemas
   -> deterministic validation and policy checks run
-  -> tool executes
+  -> tool executes and a checkpoint is written
+  -> a restart can replay-protect attempted nodes and continue eligible nodes
   -> failed validation/read-only argument errors may get a repair attempt
   -> confirmed results accumulate across steps
   -> synthesis writes the final grounded answer

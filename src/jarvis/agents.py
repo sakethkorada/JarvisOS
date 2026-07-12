@@ -86,6 +86,7 @@ def default_agent_registry() -> AgentRegistry:
             description="Handles configured calendar tools.",
             allowed_tools=(),
             execution_role="tool_use",
+            capability_domains=("calendar",),
         )
     )
     registry.register(
@@ -94,6 +95,7 @@ def default_agent_registry() -> AgentRegistry:
             description="Handles configured email tools.",
             allowed_tools=(),
             execution_role="tool_use",
+            capability_domains=("email",),
         )
     )
     registry.register(
@@ -102,6 +104,7 @@ def default_agent_registry() -> AgentRegistry:
             description="Handles configured music tools.",
             allowed_tools=(),
             execution_role="tool_use",
+            capability_domains=("music",),
         )
     )
     registry.register(

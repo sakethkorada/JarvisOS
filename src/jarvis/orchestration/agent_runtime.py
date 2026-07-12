@@ -36,9 +36,10 @@ class AgentRuntime:
         mode: str,
     ) -> str:
         """Resolve the concrete model provider for this agent request."""
+        effective_mode = mode or self._agent.default_model_mode
         return self._models.resolve_provider_name(
             explicit_provider_name=explicit_model,
-            mode=mode,
+            mode=effective_mode,
             role=self._agent.execution_role,
         )
 
@@ -48,7 +49,15 @@ class AgentRuntime:
         explicit_model: str | None,
     ) -> AgentRunResult:
         """Run a model request using this agent's execution role."""
-        provider_name = self.resolve_model_name(explicit_model, request.mode)
+        effective_mode = request.mode or self._agent.default_model_mode
+        if effective_mode != request.mode:
+            request = ModelRequest(
+                goal=request.goal,
+                messages=request.messages,
+                mode=effective_mode,
+                system_prompt=request.system_prompt,
+            )
+        provider_name = self.resolve_model_name(explicit_model, effective_mode)
         response = self._models.run(
             request,
             provider_name=explicit_model,

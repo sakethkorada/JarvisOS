@@ -59,13 +59,13 @@ def create_mcp_server(
     mcp = FastMCP("JarvisOS Gmail")
 
     @mcp.tool()
-    def list_recent(max_results: int = 10, label_ids: str = "INBOX") -> str:
+    def list_recent(max_results: int = 10, label_ids: str = "INBOX") -> dict[str, Any]:
         """List broadly recent Gmail messages for a general recent-email request.
 
         Do not use for messages related to a named person, event, or topic.
         """
-        return _tool_text(
-            lambda: list_recent_text(
+        return _tool_result(
+            lambda: list_recent_result(
                 auth_db=auth_db,
                 config_path=config_path,
                 provider=provider,
@@ -80,13 +80,13 @@ def create_mcp_server(
         query: str,
         max_results: int = 10,
         include_spam_trash: bool = False,
-    ) -> str:
+    ) -> dict[str, Any]:
         """Search Gmail for messages related to a named person, event, or topic.
 
         Use Gmail search syntax for organizations and keywords as well.
         """
-        return _tool_text(
-            lambda: search_messages_text(
+        return _tool_result(
+            lambda: search_messages_result(
                 auth_db=auth_db,
                 config_path=config_path,
                 provider=provider,
@@ -98,10 +98,10 @@ def create_mcp_server(
         )
 
     @mcp.tool()
-    def get_message(message_id: str) -> str:
+    def get_message(message_id: str) -> dict[str, Any]:
         """Get one Gmail message by API message id."""
-        return _tool_text(
-            lambda: get_message_text(
+        return _tool_result(
+            lambda: get_message_result(
                 auth_db=auth_db,
                 config_path=config_path,
                 provider=provider,
@@ -111,10 +111,10 @@ def create_mcp_server(
         )
 
     @mcp.tool()
-    def get_thread(thread_id: str, max_messages: int = 10) -> str:
+    def get_thread(thread_id: str, max_messages: int = 10) -> dict[str, Any]:
         """Get a Gmail thread by API thread id."""
-        return _tool_text(
-            lambda: get_thread_text(
+        return _tool_result(
+            lambda: get_thread_result(
                 auth_db=auth_db,
                 config_path=config_path,
                 provider=provider,
@@ -136,8 +136,29 @@ def list_recent_text(
     label_ids: str = "INBOX",
 ) -> str:
     """Return a readable list of recent Gmail messages."""
+    return str(
+        list_recent_result(
+            auth_db=auth_db,
+            config_path=config_path,
+            provider=provider,
+            api_base_url=api_base_url,
+            max_results=max_results,
+            label_ids=label_ids,
+        )["text"]
+    )
+
+
+def list_recent_result(
+    auth_db: Path,
+    config_path: Path | None,
+    provider: str,
+    api_base_url: str,
+    max_results: int = 10,
+    label_ids: str = "INBOX",
+) -> dict[str, Any]:
+    """Return normalized records for a broad recent-message read."""
     labels = _split_csv(label_ids)
-    return _list_messages_text(
+    return _list_messages_result(
         auth_db=auth_db,
         config_path=config_path,
         provider=provider,
@@ -158,7 +179,30 @@ def search_messages_text(
     include_spam_trash: bool = False,
 ) -> str:
     """Return a readable list of Gmail messages matching a search query."""
-    return _list_messages_text(
+    return str(
+        search_messages_result(
+            auth_db=auth_db,
+            config_path=config_path,
+            provider=provider,
+            api_base_url=api_base_url,
+            query=query,
+            max_results=max_results,
+            include_spam_trash=include_spam_trash,
+        )["text"]
+    )
+
+
+def search_messages_result(
+    auth_db: Path,
+    config_path: Path | None,
+    provider: str,
+    api_base_url: str,
+    query: str,
+    max_results: int = 10,
+    include_spam_trash: bool = False,
+) -> dict[str, Any]:
+    """Return normalized records for a Gmail search."""
+    return _list_messages_result(
         auth_db=auth_db,
         config_path=config_path,
         provider=provider,
@@ -178,9 +222,34 @@ def get_message_text(
     message_id: str,
 ) -> str:
     """Return a readable Gmail message summary by message id."""
+    return str(
+        get_message_result(
+            auth_db=auth_db,
+            config_path=config_path,
+            provider=provider,
+            api_base_url=api_base_url,
+            message_id=message_id,
+        )["text"]
+    )
+
+
+def get_message_result(
+    auth_db: Path,
+    config_path: Path | None,
+    provider: str,
+    api_base_url: str,
+    message_id: str,
+) -> dict[str, Any]:
+    """Return one normalized Gmail message record."""
     token = _access_token(auth_db, config_path, provider)
     message = _get_message(api_base_url, token, message_id)
-    return "Message:\n" + _format_message(message)
+    record = _message_record(message)
+    return {
+        "text": "Message:\n" + _format_message(message),
+        "records": [record],
+        "ids": [record["id"]],
+        "metadata": {"record_type": "email_message"},
+    }
 
 
 def get_thread_text(
@@ -192,6 +261,27 @@ def get_thread_text(
     max_messages: int = 10,
 ) -> str:
     """Return a readable Gmail thread summary by thread id."""
+    return str(
+        get_thread_result(
+            auth_db=auth_db,
+            config_path=config_path,
+            provider=provider,
+            api_base_url=api_base_url,
+            thread_id=thread_id,
+            max_messages=max_messages,
+        )["text"]
+    )
+
+
+def get_thread_result(
+    auth_db: Path,
+    config_path: Path | None,
+    provider: str,
+    api_base_url: str,
+    thread_id: str,
+    max_messages: int = 10,
+) -> dict[str, Any]:
+    """Return normalized records for one Gmail thread."""
     token = _access_token(auth_db, config_path, provider)
     encoded_thread_id = quote(thread_id, safe="")
     query = urlencode(
@@ -207,17 +297,28 @@ def get_thread_text(
     )
     messages = data.get("messages", [])
     if not isinstance(messages, list) or not messages:
-        return f"No messages found in thread {thread_id}."
+        return {
+            "text": f"No messages found in thread {thread_id}.",
+            "records": [],
+            "ids": [],
+        }
 
     limit = max(1, min(int(max_messages), 25))
     lines = [f"Thread {thread_id}:"]
+    records: list[dict[str, Any]] = []
     for message in messages[:limit]:
         if isinstance(message, dict):
             lines.append(_format_message(message))
-    return "\n".join(lines)
+            records.append(_message_record(message))
+    return {
+        "text": "\n".join(lines),
+        "records": records,
+        "ids": [record["id"] for record in records],
+        "metadata": {"record_type": "email_message", "thread_id": thread_id},
+    }
 
 
-def _list_messages_text(
+def _list_messages_result(
     auth_db: Path,
     config_path: Path | None,
     provider: str,
@@ -227,7 +328,7 @@ def _list_messages_text(
     query: str | None = None,
     label_ids: tuple[str, ...] = (),
     include_spam_trash: bool = False,
-) -> str:
+) -> dict[str, Any]:
     token = _access_token(auth_db, config_path, provider)
     limit = max(1, min(int(max_results), 25))
     params: dict[str, Any] = {
@@ -245,9 +346,10 @@ def _list_messages_text(
     )
     messages = data.get("messages", [])
     if not isinstance(messages, list) or not messages:
-        return f"{title}: no messages found."
+        return {"text": f"{title}: no messages found.", "records": [], "ids": []}
 
     lines = [f"{title}:"]
+    records: list[dict[str, Any]] = []
     for item in messages[:limit]:
         if not isinstance(item, dict):
             continue
@@ -256,7 +358,13 @@ def _list_messages_text(
             continue
         message = _get_message(api_base_url, token, message_id)
         lines.append(_format_message(message))
-    return "\n".join(lines)
+        records.append(_message_record(message))
+    return {
+        "text": "\n".join(lines),
+        "records": records,
+        "ids": [record["id"] for record in records],
+        "metadata": {"record_type": "email_message"},
+    }
 
 
 def _get_message(api_base_url: str, access_token: str, message_id: str) -> dict[str, Any]:
@@ -288,6 +396,19 @@ def _format_message(message: dict[str, Any]) -> str:
     return line
 
 
+def _message_record(message: dict[str, Any]) -> dict[str, str]:
+    """Map Gmail metadata into the shared record fields."""
+    headers = _message_headers(message)
+    return {
+        "id": str(message.get("id", "unknown")),
+        "thread_id": str(message.get("threadId", "unknown")),
+        "subject": headers.get("subject") or "(no subject)",
+        "sender": headers.get("from") or "unknown sender",
+        "received_at": headers.get("date") or "unknown date",
+        "snippet": str(message.get("snippet", "")).strip(),
+    }
+
+
 def _message_headers(message: dict[str, Any]) -> dict[str, str]:
     payload = message.get("payload", {})
     headers = payload.get("headers", []) if isinstance(payload, dict) else []
@@ -310,12 +431,12 @@ def _split_csv(value: str | None) -> tuple[str, ...]:
     return tuple(item.strip() for item in value.split(",") if item.strip())
 
 
-def _tool_text(handler: Callable[[], str]) -> str:
-    """Return tool text while keeping auth errors in-band for MCP clients."""
+def _tool_result(handler: Callable[[], dict[str, Any]]) -> dict[str, Any]:
+    """Return structured data while keeping auth errors in-band for MCP clients."""
     try:
         return handler()
     except RuntimeError as exc:
-        return f"AUTH_ERROR: {exc}"
+        return {"text": f"AUTH_ERROR: {exc}", "records": [], "ids": []}
 
 
 def _parse_args() -> argparse.Namespace:

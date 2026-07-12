@@ -891,3 +891,68 @@ source.
 Tradeoff: the planner prompt is slightly more prescriptive about completeness,
 but it does not contain provider keyword-routing branches or force any tool
 outside the registered catalog.
+
+## 0063 - Normalize Tool Outputs Before Synthesis
+
+Successful tool outputs now guarantee `text`, `records`, `ids`, and `metadata`.
+ToolRegistry normalizes ordinary local handler dictionaries, while the MCP
+adapter maps `structuredContent` into the same fields. Raw MCP responses remain
+available for trace/debug inspection but are excluded from the model synthesis
+context. The bundled Google Calendar and Gmail FastMCP wrappers now emit
+structured records directly.
+
+Reason: a provider text blob is not a durable cross-tool data contract. A
+normalized result lets later steps and synthesis consume Calendar events, Gmail
+messages, Spotify items, plugin records, or future MCP results without parsing
+provider-specific text or changing planner logic.
+
+Tradeoff: adapters should make a small deliberate mapping from provider fields
+to records. That mapping belongs at the integration boundary, where provider
+semantics already live, not in the orchestrator or planner.
+
+## 0064 - Execute Validated Plans Through A Graph Seam
+
+`ExecutionPlan` steps may declare dependencies and optional output keys. The
+runtime validates the plan as a DAG and executes it in deterministic
+topological order through `ExecutionGraph`.
+
+Reason: graph semantics give multi-step workflows an explicit place for
+ordering, readiness, named results, and future bounded concurrency without
+adding provider-specific branches to the orchestrator.
+
+This extends the minimal `$last.<field>` reference from decision 0052 with
+stable `$step.<id>.<field>` references; `$last` remains supported.
+
+Tradeoff: the first graph slice remains sequential. Concurrency and broader
+replanning wait until restart, cancellation, and failure semantics are tested.
+
+## 0065 - Checkpoint Runs In The Existing Trace Database
+
+When tracing is enabled, the CLI supplies `RunJournal`, which appends plan
+progress, completed steps, normalized results, status, and trace length to the
+configured SQLite trace database during execution.
+
+Reason: a trace written only after the CLI returns cannot support crash
+reconstruction, approval continuation, or safe resume. Checkpoints establish a
+durable lifecycle substrate without changing existing tool/provider contracts.
+
+Tradeoff: checkpoints are reconstructable state, not yet a resume command. The
+next slice must add idempotency keys and an explicit `runs resume` flow before
+external side effects can be retried.
+
+## 0066 - Resume Only Never-Attempted Eligible Nodes
+
+`RunJournal` now reconstructs a checkpointed plan, completed steps, paired
+results, and persisted trace history. `jarvis runs resume <run_id>` preserves
+the original run id, skips every previously attempted node, and executes only
+unattempted nodes whose dependencies have confirmed successful results.
+`--dry-run` exposes replay-protected, eligible, and blocked nodes before any
+tool call.
+
+Reason: a generic restart path must never turn a process interruption into a
+duplicate external action. Treating all attempted nodes as replay-protected is
+conservative but safe while integrations do not yet declare idempotency keys.
+
+Tradeoff: failed, approval-blocked, and externally visible nodes are not
+automatically retried or applied on resume. A later slice must add explicit
+idempotency metadata and approval continuation before those actions can resume.

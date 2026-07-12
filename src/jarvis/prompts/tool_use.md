@@ -8,6 +8,9 @@ Rules:
 - Do not include keys outside the schema.
 - Infer arguments from the user goal, current datetime, current arguments,
   prior successful tool results, validation errors, and execution feedback.
+- Prior successful results use `text`, `records`, `ids`, and `metadata`.
+  Preserve a supplied reference when it matches the selected schema; otherwise
+  use the confirmed structured value it resolves to.
 - If validation_error or feedback is present, repair the attempted arguments.
 - When the user goal contains relative dates or times and the schema has date,
   time, start, end, min, or max fields, convert the relative phrase into

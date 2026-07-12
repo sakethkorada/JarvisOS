@@ -8,15 +8,25 @@ Schema:
 {
   "steps": [
     {
+      "step_id": "optional_stable_step_id",
       "tool_name": "memory.search",
       "arguments": {"query": "user goal"},
-      "description": "Search memory for relevant context."
+      "description": "Search memory for relevant context.",
+      "depends_on": [],
+      "output_key": "optional_named_output"
     }
   ]
 }
 
 Rules:
 - Use only available tools.
+- `step_id` is optional, but required when another step depends on this step.
+  Dependencies must reference exact `step_id` values from this plan, never tool
+  names or semantic labels such as `current_time`.
+- `depends_on` is optional and must list exact step ids when a step needs their
+  confirmed results. Keep independent steps dependency-free.
+- `output_key` is optional and must be unique when present; use it for future
+  named-output bindings rather than relying on positional step order.
 - Planning completeness is mandatory. First identify every explicit information
   source, service, or requested outcome in the user goal. Before returning the
   plan, include at least one evidence-producing step for each one that has an
@@ -60,8 +70,11 @@ Rules:
   synthesis will write the user-facing answer.
 - Do not include filler tools. Every step must directly contribute evidence or
   an action needed for the user's goal.
-- To pass text from one step into the next step, use "$last.text" as the
-  argument value only when the next tool accepts natural language text.
+- To pass a confirmed value from one step into the next, use "$last.<path>" for
+  the immediately previous successful result, or "$step.<id>.<path>" for a
+  dependency's named result. Paths can use dotted fields and numeric list
+  indexes, such as "$step.find.records[0].id". Use references only when the
+  target field exists.
 - Do not use "$last.text" for id fields such as message_id, thread_id, event_id,
   or calendar_id unless the previous step is guaranteed to output exactly that
   id as its text field. Search/list result text is not an id.
